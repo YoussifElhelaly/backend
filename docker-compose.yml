@@ -1,0 +1,32 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${DB_USER:-whatify}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-whatify_dev}
+      POSTGRES_DB: ${DB_NAME:-whatify}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-whatify}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    ports:
+      - "${PORT:-8080}:8080"
+    env_file: .env
+    environment:
+      - DB_HOST=postgres
+      - GIN_MODE=release
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:

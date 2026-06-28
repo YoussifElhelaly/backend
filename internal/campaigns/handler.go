@@ -1,9 +1,14 @@
 package campaigns
 
 import (
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
 	"net/http"
+	"strings"
 	"time"
 	"whatify/backend/internal/activity"
+	"whatify/backend/internal/billing"
 	"whatify/backend/internal/middleware"
 	"whatify/backend/internal/models"
 	"whatify/backend/pkg/database"
@@ -51,6 +56,10 @@ type CreateCampaignInput struct {
 	Name         string       `json:"name" binding:"required"`
 	SessionPhone string       `json:"session_phone" binding:"required"`
 	Message      string       `json:"message" binding:"required"`
+	Variants     []string     `json:"variants"` // AI-approved message clones
+	MediaBase64  string       `json:"media_base64"` // optional image (raw base64 or data URL)
+	MediaMime    string       `json:"media_mime"`
+	MediaName    string       `json:"media_name"`
 	ContactIDs   []uuid.UUID  `json:"contact_ids"`
 	TagIDs       []uuid.UUID  `json:"tag_ids"`
 	ScheduledAt  *time.Time   `json:"scheduled_at"`
@@ -85,11 +94,35 @@ func createCampaign(c *gin.Context) {
 		}
 	}
 
+	// Validate contact count against daily message limit
+	if len(contactMap) > 0 {
+		if err := billing.CheckCampaignLimitAtCreation(tenantID, input.SessionPhone, len(contactMap)); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+	}
+
+	media, mime, mErr := decodeMedia(input.MediaBase64, input.MediaMime)
+	if mErr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": mErr.Error()})
+		return
+	}
+
+	variantsJSON := "[]"
+	if len(input.Variants) > 0 {
+		if b, _ := json.Marshal(input.Variants); b != nil {
+			variantsJSON = string(b)
+		}
+	}
 	campaign := models.Campaign{
 		TenantID:     tenantID,
 		SessionPhone: input.SessionPhone,
 		Name:         input.Name,
 		Message:      input.Message,
+		Variants:     variantsJSON,
+		MediaPayload: media,
+		MediaMime:    mime,
+		MediaName:    input.MediaName,
 		ScheduledAt:  input.ScheduledAt,
 		FunnelID:     input.FunnelID,
 		Status:       models.CampaignStatusDraft,
@@ -125,6 +158,10 @@ func createCampaign(c *gin.Context) {
 type UpdateCampaignInput struct {
 	Name        string     `json:"name"`
 	Message     string     `json:"message"`
+	Variants    []string   `json:"variants"` // nil = keep existing, [] = clear
+	MediaBase64 *string    `json:"media_base64"` // "" clears the image, omitted leaves it unchanged
+	MediaMime   string     `json:"media_mime"`
+	MediaName   string     `json:"media_name"`
 	ScheduledAt *time.Time `json:"scheduled_at"`
 }
 
@@ -153,9 +190,58 @@ func updateCampaign(c *gin.Context) {
 	if input.Message != "" {
 		campaign.Message = input.Message
 	}
+	if input.Variants != nil {
+		if b, _ := json.Marshal(input.Variants); b != nil {
+			campaign.Variants = string(b)
+		}
+	}
+	if input.MediaBase64 != nil {
+		media, mime, mErr := decodeMedia(*input.MediaBase64, input.MediaMime)
+		if mErr != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": mErr.Error()})
+			return
+		}
+		campaign.MediaPayload = media
+		campaign.MediaMime = mime
+		campaign.MediaName = input.MediaName
+	}
 	campaign.ScheduledAt = input.ScheduledAt
 	database.DB.Save(&campaign)
 	c.JSON(http.StatusOK, campaign)
+}
+
+// decodeMedia decodes an optional base64 image (raw or "data:<mime>;base64,..."
+// data URL) into bytes, returning the bytes and resolved MIME type. Enforces a
+// 16 MB cap (WhatsApp's media limit). An empty input returns (nil, "", nil).
+func decodeMedia(b64, mime string) ([]byte, string, error) {
+	if b64 == "" {
+		return nil, "", nil
+	}
+	if strings.HasPrefix(b64, "data:") {
+		if comma := strings.IndexByte(b64, ','); comma != -1 {
+			header := b64[5:comma] // e.g. "image/png;base64"
+			if semi := strings.IndexByte(header, ';'); semi != -1 {
+				if mime == "" {
+					mime = header[:semi]
+				}
+			}
+			b64 = b64[comma+1:]
+		}
+	}
+	data, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		return nil, "", fmt.Errorf("invalid media encoding")
+	}
+	if len(data) > 16<<20 {
+		return nil, "", fmt.Errorf("media too large (max 16 MB)")
+	}
+	if mime == "" {
+		mime = http.DetectContentType(data)
+	}
+	if mime == "application/ogg" {
+		mime = "audio/ogg; codecs=opus"
+	}
+	return data, mime, nil
 }
 
 // ── Delete ───────────────────────────────────────────────────────────────────

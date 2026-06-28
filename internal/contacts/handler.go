@@ -3,6 +3,7 @@ package contacts
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 	"whatify/backend/internal/activity"
 	"whatify/backend/internal/middleware"
 	"whatify/backend/internal/models"
@@ -17,31 +18,109 @@ func listContacts(c *gin.Context) {
 	tenantID := c.MustGet(middleware.CtxTenantID).(uuid.UUID)
 	sessionPhone := c.Query("session_phone")
 	search := c.Query("q")
+	tagID := c.Query("tag")
 
-	limit := 1000
+	// Pagination — default 100 per page, clamped to [1, 500].
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	if page < 1 {
+		page = 1
+	}
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "100"))
+	if limit < 1 {
+		limit = 100
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	offset := (page - 1) * limit
 
 	var contacts []models.Contact
-	query := database.DB.Preload("Tags").Where("tenant_id = ?", tenantID)
+	query := database.DB.Model(&models.Contact{}).Where("tenant_id = ?", tenantID)
 
 	if sessionPhone != "" {
+		// Match contacts either by their live session_id OR via their conversations'
+		// session_phone. The latter is robust to session delete/recreate (where
+		// contact.session_id goes stale), the former keeps freshly device-synced
+		// contacts that have no conversation yet. Together this mirrors the inbox
+		// plus any synced contacts for the selected number.
+		sub := "id IN (SELECT contact_id FROM conversations WHERE tenant_id = ? AND session_phone = ? AND deleted_at IS NULL)"
 		var sess models.WhatsAppSession
 		if err := database.DB.Where("tenant_id = ? AND phone = ?", tenantID, sessionPhone).First(&sess).Error; err == nil {
-			query = query.Where("session_id = ?", sess.ID)
+			query = query.Where("session_id = ? OR "+sub, sess.ID, tenantID, sessionPhone)
 		} else {
-			c.JSON(http.StatusOK, []models.Contact{})
-			return
+			query = query.Where(sub, tenantID, sessionPhone)
 		}
 	}
 
 	if search != "" {
-		query = query.Where("name ILIKE ? OR phone_number ILIKE ?", "%"+search+"%", "%"+search+"%")
+		query = query.Where("name ILIKE ? OR push_name ILIKE ? OR phone_number ILIKE ?",
+			"%"+search+"%", "%"+search+"%", "%"+search+"%")
 	}
 
-	if err := query.Order("name ASC").Limit(limit).Find(&contacts).Error; err != nil {
+	if tagID == "__none__" {
+		query = query.Where("id NOT IN (SELECT contact_id FROM contact_tags)")
+	} else if tagID != "" {
+		query = query.Where("id IN (SELECT contact_id FROM contact_tags WHERE tag_id = ?)", tagID)
+	}
+
+	var total int64
+	if err := query.Count(&total).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch contacts"})
 		return
 	}
-	c.JSON(http.StatusOK, contacts)
+
+	if err := query.Preload("Tags").Order("name ASC").Offset(offset).Limit(limit).Find(&contacts).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch contacts"})
+		return
+	}
+
+	// Tag counts for the current session (across ALL contacts, not just the page)
+	tagCounts := make(map[string]int64)
+	var baseQuery string
+	var baseArgs []interface{}
+	if sessionPhone != "" {
+		var sess models.WhatsAppSession
+		sessErr := database.DB.Where("tenant_id = ? AND phone = ?", tenantID, sessionPhone).First(&sess).Error
+		if sessErr == nil {
+			baseQuery = "(session_id = ? OR id IN (SELECT contact_id FROM conversations WHERE tenant_id = ? AND session_phone = ? AND deleted_at IS NULL))"
+			baseArgs = []interface{}{sess.ID, tenantID, sessionPhone}
+		} else {
+			baseQuery = "id IN (SELECT contact_id FROM conversations WHERE tenant_id = ? AND session_phone = ? AND deleted_at IS NULL)"
+			baseArgs = []interface{}{tenantID, sessionPhone}
+		}
+	} else {
+		baseQuery = "tenant_id = ?"
+		baseArgs = []interface{}{tenantID}
+	}
+
+	var tagResults []struct {
+		TagID    string
+		CountVal int64
+	}
+	database.DB.Model(&models.Contact{}).
+		Select("contact_tags.tag_id, COUNT(DISTINCT contacts.id) AS count_val").
+		Joins("JOIN contact_tags ON contacts.id = contact_tags.contact_id").
+		Where("contacts.tenant_id = ? AND "+baseQuery, append([]interface{}{tenantID}, baseArgs...)...).
+		Group("contact_tags.tag_id").
+		Scan(&tagResults)
+	for _, tr := range tagResults {
+		tagCounts[tr.TagID] = tr.CountVal
+	}
+
+	// Count contacts with no tags
+	var noTagsCount int64
+	database.DB.Model(&models.Contact{}).
+		Where("contacts.tenant_id = ? AND "+baseQuery+" AND contacts.id NOT IN (SELECT contact_id FROM contact_tags)", append([]interface{}{tenantID}, baseArgs...)...).
+		Count(&noTagsCount)
+	tagCounts["__none__"] = noTagsCount
+
+	c.JSON(http.StatusOK, gin.H{
+		"contacts":   contacts,
+		"total":      total,
+		"tag_counts": tagCounts,
+		"page":       page,
+		"limit":      limit,
+	})
 }
 
 type UpdateContactInput struct {

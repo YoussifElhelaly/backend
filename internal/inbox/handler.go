@@ -2,8 +2,13 @@ package inbox
 
 import (
 	"context"
+	"encoding/json"
+	"log"
+	"log/slog"
 	"net/http"
+	"os"
 	"strconv"
+	"strings"
 	"time"
 	"whatify/backend/internal/activity"
 	"whatify/backend/internal/billing"
@@ -30,6 +35,7 @@ func RegisterRoutes(r *gin.RouterGroup) {
 		g.GET("/conversations/:id", getConversation)
 		g.GET("/conversations/:id/messages", listMessages)
 		g.POST("/conversations/:id/messages", handleSend)
+		g.POST("/conversations/:id/load-older", handleLoadOlder)
 		g.POST("/conversations/:id/media", handleSendMedia)
 		g.POST("/conversations/:id/notes", handleNote)
 		g.PUT("/conversations/:id/assign", handleAssign)
@@ -53,7 +59,8 @@ func listConversations(c *gin.Context) {
 		limit = 30
 	}
 
-	convs, err := getConversations(tenantID, page, limit, sessionPhone)
+	chatType := c.Query("chat_type")
+	convs, err := getConversations(tenantID, page, limit, sessionPhone, chatType)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -106,6 +113,19 @@ func handleResync(c *gin.Context) {
 			// events.Message path: HandleIncoming broadcasts each message via WS directly.
 			// Final safety net: TriggerSync after 12s to catch everything.
 			time.Sleep(12 * time.Second)
+
+			// WhatsApp only sends HistorySync on first QR registration, not on reconnects.
+			// If the DB is still empty after reconnect, bootstrap conversation stubs from the
+			// whatsmeow local device store (whatsmeow_chat_settings + whatsmeow_contacts).
+			var convCount int64
+			database.DB.Model(&models.Conversation{}).
+				Where("tenant_id = ? AND session_phone = ?", tenantID, phone).
+				Count(&convCount)
+			if convCount == 0 {
+				log.Printf("resync: no conversations after 12s for phone=%s, bootstrapping from WA store", phone)
+				BootstrapFromWAStore(sid, tenantID, phone)
+			}
+
 			TriggerSync(tenantID, "")
 		}()
 	}
@@ -263,6 +283,63 @@ func handleSend(c *gin.Context) {
 	c.JSON(http.StatusCreated, msg)
 }
 
+// handleLoadOlder triggers an on-demand WhatsApp history sync for one conversation,
+// fetching messages older than the oldest one we currently have. The fetched messages
+// arrive asynchronously via the HistorySync (ON_DEMAND) handler and are broadcast over
+// WS, so the client just refreshes after a few seconds. Responds 202 immediately.
+func handleLoadOlder(c *gin.Context) {
+	tenantID := c.MustGet(middleware.CtxTenantID).(uuid.UUID)
+	convID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+
+	conv, err := getConversationByID(tenantID, convID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Anchor at the oldest message that carries a real WhatsApp message ID.
+	var oldest models.Message
+	if err := database.DB.
+		Where("conversation_id = ? AND wa_message_id != '' AND is_note = ?", convID, false).
+		Order("timestamp asc").First(&oldest).Error; err != nil {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "no anchor message to load older history from"})
+		return
+	}
+
+	// Resolve the currently-active session by phone (same as handleSend).
+	sessionIDStr := conv.SessionID
+	if conv.SessionPhone != "" {
+		var waSession models.WhatsAppSession
+		if err := database.DB.
+			Where("tenant_id = ? AND phone = ? AND status = ?", tenantID, conv.SessionPhone, models.StatusConnected).
+			First(&waSession).Error; err == nil {
+			sessionIDStr = waSession.ID.String()
+		}
+	}
+
+	// Build the chat JID: group/broadcast chats use their stored JID, individual
+	// chats use "<phone>@s.whatsapp.net".
+	chatJID := conv.Contact.PhoneNumber + "@s.whatsapp.net"
+	if (conv.ChatType == string(models.ChatTypeGroup) || conv.ChatType == string(models.ChatTypeBroadcast)) && conv.GroupJID != "" {
+		chatJID = conv.GroupJID
+	}
+
+	fromMe := oldest.Direction == models.DirectionOutgoing
+	if err := session.Mgr.RequestOlderHistory(sessionIDStr, chatJID, oldest.WaMessageID, fromMe, oldest.Timestamp, 50); err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "whatsapp request failed: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusAccepted, gin.H{
+		"message":   "requested older history from WhatsApp",
+		"anchor_ts": oldest.Timestamp,
+	})
+}
+
 func handleNote(c *gin.Context) {
 	tenantID := c.MustGet(middleware.CtxTenantID).(uuid.UUID)
 	userID := c.MustGet(middleware.CtxUserID).(uuid.UUID)
@@ -361,13 +438,40 @@ func handleRead(c *gin.Context) {
 
 // handleWS upgrades the connection to WebSocket and registers it with the hub.
 // Auth is via ?token= query param (middleware already handles this).
+// Clients can send { "event": "request_delta", "last_synced_at": "<RFC3339>" }
+// and the server will stream only the messages/conversations newer than that timestamp.
 func handleWS(c *gin.Context) {
 	tenantID := c.MustGet(middleware.CtxTenantID).(uuid.UUID)
 
-	ws, err := websocket.Accept(c.Writer, c.Request, &websocket.AcceptOptions{
-		InsecureSkipVerify: true,
-	})
+	// Build allowed origins list from FRONTEND_URL and ALLOWED_ORIGINS env vars.
+	var allowedOrigins []string
+	if fe := os.Getenv("FRONTEND_URL"); fe != "" {
+		allowedOrigins = append(allowedOrigins, fe)
+	}
+	if ao := os.Getenv("ALLOWED_ORIGINS"); ao != "" {
+		for _, o := range strings.Split(ao, ",") {
+			o = strings.TrimSpace(o)
+			if o != "" {
+				allowedOrigins = append(allowedOrigins, o)
+			}
+		}
+	}
+
+	acceptOpts := &websocket.AcceptOptions{}
+	if len(allowedOrigins) > 0 {
+		acceptOpts.OriginPatterns = allowedOrigins
+	} else if os.Getenv("GIN_MODE") == "release" {
+		// In production, refuse to accept WebSocket connections when no origins are configured.
+		c.JSON(http.StatusForbidden, gin.H{"error": "ALLOWED_ORIGINS must be set for WebSocket in production"})
+		return
+	} else {
+		// Dev fallback: allow all origins only in non-release mode.
+		acceptOpts.InsecureSkipVerify = true
+	}
+
+	ws, err := websocket.Accept(c.Writer, c.Request, acceptOpts)
 	if err != nil {
+		slog.Error("websocket accept failed", "error", err)
 		return
 	}
 
@@ -383,8 +487,71 @@ func handleWS(c *gin.Context) {
 
 	ctx := context.Background()
 	for {
-		if _, _, err := ws.Read(ctx); err != nil {
+		_, msg, err := ws.Read(ctx)
+		if err != nil {
 			break
 		}
+
+		var req struct {
+			Event        string `json:"event"`
+			LastSyncedAt string `json:"last_synced_at"`
+		}
+		if jsonErr := json.Unmarshal(msg, &req); jsonErr != nil {
+			continue
+		}
+		if req.Event != "request_delta" || req.LastSyncedAt == "" {
+			continue
+		}
+
+		since, parseErr := time.Parse(time.RFC3339, req.LastSyncedAt)
+		if parseErr != nil {
+			continue
+		}
+
+		slog.Info("delta sync requested", "tenant_id", tenantID, "since", since.Format(time.RFC3339))
+		go streamDelta(conn, tenantID, since)
 	}
+}
+
+// streamDelta sends new conversations + messages since `since` to one specific connection.
+func streamDelta(conn *wsConn, tenantID uuid.UUID, since time.Time) {
+	const chunkSize = 200
+	page := 1
+	totalMsgs := 0
+
+	GlobalHub.SendTo(conn, WSEvent{Event: "delta_start", Data: nil})
+
+	for {
+		convs, msgs, err := getDelta(tenantID, since, page, chunkSize)
+		if err != nil {
+			log.Printf("delta sync error: %v", err)
+			break
+		}
+
+		if len(msgs) == 0 && page == 1 {
+			// Nothing new — still send delta_complete so the client updates its cursor
+			break
+		}
+
+		GlobalHub.SendTo(conn, WSEvent{
+			Event: "delta_chunk",
+			Data: map[string]interface{}{
+				"conversations": convs,
+				"messages":      msgs,
+				"page":          page,
+			},
+		})
+
+		totalMsgs += len(msgs)
+		if len(msgs) < chunkSize {
+			break
+		}
+		page++
+	}
+
+	log.Printf("delta sync done: tenant=%s messages=%d pages=%d", tenantID, totalMsgs, page)
+	GlobalHub.SendTo(conn, WSEvent{Event: "delta_complete", Data: map[string]interface{}{
+		"synced_at": time.Now().UTC().Format(time.RFC3339),
+		"count":     totalMsgs,
+	}})
 }

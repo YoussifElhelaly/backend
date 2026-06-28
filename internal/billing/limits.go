@@ -28,6 +28,17 @@ func GetLimits(plan models.Plan) PlanLimits {
 	if l, ok := PlanDefs[plan]; ok {
 		return l
 	}
+	// Check for custom plan in database
+	var planDef models.PlanDef
+	if err := database.DB.Where("name = ? AND is_active = true", plan).First(&planDef).Error; err == nil {
+		return PlanLimits{
+			Sessions:    planDef.Sessions,
+			MessagesDay: planDef.MessagesDay,
+			Agents:      planDef.Agents,
+			PriceUSD:    planDef.PriceUSD,
+			Label:       planDef.Label,
+		}
+	}
 	return PlanDefs[models.PlanStarter]
 }
 
@@ -53,29 +64,82 @@ func CheckSessionLimit(tenantID uuid.UUID) error {
 	return nil
 }
 
-// CheckDailyMessageLimit returns an error if the session has reached its plan's
-// daily outbound message limit. sessionPhone identifies which WhatsApp session to check.
+// CheckDailyMessageLimit returns an error if the session has reached the
+// tenant-configured daily outbound message limit (DailyMessageLimit).
+// A value of 0 means unlimited.
 func CheckDailyMessageLimit(tenantID uuid.UUID, sessionPhone string) error {
 	var tenant models.Tenant
-	if err := database.DB.Select("plan").First(&tenant, "id = ?", tenantID).Error; err != nil {
+	if err := database.DB.Select("daily_message_limit").First(&tenant, "id = ?", tenantID).Error; err != nil {
 		return nil
 	}
-	limits := GetLimits(tenant.Plan)
-	if limits.MessagesDay == -1 {
-		return nil // unlimited plan
+
+	if tenant.DailyMessageLimit <= 0 {
+		return nil // unlimited
 	}
 
 	var sess models.WhatsAppSession
 	if err := database.DB.Select("daily_count").
 		Where("tenant_id = ? AND phone = ?", tenantID, sessionPhone).
 		First(&sess).Error; err != nil {
-		return nil // session not found — let the send fail elsewhere
+		return nil
 	}
 
-	if sess.DailyCount >= limits.MessagesDay {
-		return fmt.Errorf("daily message limit reached (%d/%d messages). Upgrade your plan to send more",
-			sess.DailyCount, limits.MessagesDay)
+	if sess.DailyCount >= tenant.DailyMessageLimit {
+		return fmt.Errorf("daily message limit reached (%d/%d messages). Contact admin to increase the limit",
+			sess.DailyCount, tenant.DailyMessageLimit)
 	}
+
+	return nil
+}
+
+// GetDailyUsage returns the current daily usage (used, limit) for a session.
+// limit = 0 means unlimited.
+func GetDailyUsage(tenantID uuid.UUID, sessionPhone string) (used int, limit int) {
+	var tenant models.Tenant
+	if err := database.DB.Select("daily_message_limit").First(&tenant, "id = ?", tenantID).Error; err != nil {
+		return 0, 0
+	}
+
+	var sess models.WhatsAppSession
+	if err := database.DB.Select("daily_count").
+		Where("tenant_id = ? AND phone = ?", tenantID, sessionPhone).
+		First(&sess).Error; err != nil {
+		return 0, tenant.DailyMessageLimit
+	}
+
+	return sess.DailyCount, tenant.DailyMessageLimit
+}
+
+// CheckCampaignLimitAtCreation validates that the number of selected contacts
+// does not exceed the remaining daily quota for the session.
+func CheckCampaignLimitAtCreation(tenantID uuid.UUID, sessionPhone string, contactCount int) error {
+	var tenant models.Tenant
+	if err := database.DB.Select("daily_message_limit").First(&tenant, "id = ?", tenantID).Error; err != nil {
+		return nil
+	}
+
+	if tenant.DailyMessageLimit <= 0 {
+		return nil
+	}
+
+	var sess models.WhatsAppSession
+	if err := database.DB.Select("daily_count").
+		Where("tenant_id = ? AND phone = ?", tenantID, sessionPhone).
+		First(&sess).Error; err != nil {
+		return nil
+	}
+
+	remaining := tenant.DailyMessageLimit - sess.DailyCount
+	if remaining <= 0 {
+		return fmt.Errorf("daily limit already reached (%d/%d). No more messages can be sent today",
+			sess.DailyCount, tenant.DailyMessageLimit)
+	}
+
+	if contactCount > remaining {
+		return fmt.Errorf("cannot select %d contacts — only %d messages remaining today for this session (%d/%d used)",
+			contactCount, remaining, sess.DailyCount, tenant.DailyMessageLimit)
+	}
+
 	return nil
 }
 

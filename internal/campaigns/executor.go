@@ -2,8 +2,10 @@ package campaigns
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
+	"log/slog"
 	"math/rand"
 	"strings"
 	"sync"
@@ -26,8 +28,25 @@ var (
 // SendText is wired from session.Mgr — allows campaigns to send messages
 var SendText func(sessionPhone, tenantID, to, text string) error
 
+// SendMedia sends an image/media message with an optional caption.
+var SendMedia func(sessionPhone, tenantID, to string, data []byte, mime, filename, caption string) error
+
 func init() {
 	SendText = defaultSendText
+	SendMedia = defaultSendMedia
+}
+
+func defaultSendMedia(sessionPhone, tenantID, to string, data []byte, mime, filename, caption string) error {
+	tid, err := uuid.Parse(tenantID)
+	if err != nil {
+		return err
+	}
+	var sess models.WhatsAppSession
+	if err := database.DB.Where("tenant_id = ? AND phone = ? AND status = 'CONNECTED'", tid, sessionPhone).First(&sess).Error; err != nil {
+		return fmt.Errorf("session not connected")
+	}
+	_, _, _, err = session.Mgr.SendMedia(sess.ID.String(), to, data, mime, filename, caption)
+	return err
 }
 
 func defaultSendText(sessionPhone, tenantID, to, text string) error {
@@ -47,6 +66,16 @@ func defaultSendText(sessionPhone, tenantID, to, text string) error {
 	msg := &waE2E.Message{Conversation: proto.String(text)}
 	_, sendErr := client.SendMessage(context.Background(), jid, msg)
 	return sendErr
+}
+
+// pickVariant returns a round-robin variant from variantsJSON, falling back to fallback.
+// idx is the contact index used for round-robin rotation.
+func pickVariant(variantsJSON, fallback string, idx int) string {
+	var variants []string
+	if err := json.Unmarshal([]byte(variantsJSON), &variants); err != nil || len(variants) == 0 {
+		return fallback
+	}
+	return variants[idx%len(variants)]
 }
 
 func personalize(template string, contact models.Contact) string {
@@ -81,13 +110,18 @@ func ResumeInterrupted() {
 	var campaigns []models.Campaign
 	database.DB.Where("status = ?", models.CampaignStatusRunning).Find(&campaigns)
 	for _, c := range campaigns {
-		log.Printf("campaigns: resuming interrupted campaign %s", c.ID)
+		slog.Info("campaigns: resuming interrupted campaign", "campaign_id", c.ID)
 		Launch(c.ID)
 	}
 }
 
 func run(ctx context.Context, campaignID uuid.UUID) {
 	defer running.Delete(campaignID)
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("campaigns: PANIC recovered", "campaign_id", campaignID, "panic", r)
+		}
+	}()
 
 	now := time.Now()
 	database.DB.Model(&models.Campaign{}).Where("id = ?", campaignID).
@@ -97,17 +131,31 @@ func run(ctx context.Context, campaignID uuid.UUID) {
 		})
 
 	var campaign models.Campaign
-	if err := database.DB.First(&campaign, "id = ?", campaignID).Error; err != nil {
-		log.Printf("campaigns: campaign %s not found: %v", campaignID, err)
-		return
-	}
+		if err := database.DB.First(&campaign, "id = ?", campaignID).Error; err != nil {
+			slog.Error("campaigns: campaign not found", "campaign_id", campaignID, "error", err)
+			return
+		}
 
 	var contacts []models.CampaignContact
 	database.DB.Preload("Contact").
 		Where("campaign_id = ? AND status = ?", campaignID, models.CampaignContactPending).
 		Find(&contacts)
 
-	for _, cc := range contacts {
+	// Load per-tenant delay settings once before the loop
+	var tenantSettings models.Tenant
+	database.DB.Select("campaign_delay_min, campaign_delay_max").
+		Where("id = ?", campaign.TenantID).First(&tenantSettings)
+	dMin := tenantSettings.CampaignDelayMin
+	dMax := tenantSettings.CampaignDelayMax
+	if dMin < 1 {
+		dMin = 3
+	}
+	if dMax < dMin {
+		dMax = dMin + 5
+	}
+	spread := dMax - dMin + 1
+
+	for idx, cc := range contacts {
 		select {
 		case <-ctx.Done():
 			log.Printf("campaigns: campaign %s paused/cancelled", campaignID)
@@ -115,9 +163,9 @@ func run(ctx context.Context, campaignID uuid.UUID) {
 		default:
 		}
 
-		// Abort campaign if the daily message limit has been reached
+		// Abort campaign if the plan daily limit or tenant CAP has been reached
 		if limitErr := billing.CheckDailyMessageLimit(campaign.TenantID, campaign.SessionPhone); limitErr != nil {
-			log.Printf("campaigns: campaign %s paused — daily limit: %v", campaignID, limitErr)
+			slog.Warn("campaigns: daily limit reached, pausing", "campaign_id", campaignID, "error", limitErr)
 			database.DB.Model(&models.Campaign{}).Where("id = ?", campaignID).
 				Updates(map[string]interface{}{
 					"status":    models.CampaignStatusPaused,
@@ -126,12 +174,19 @@ func run(ctx context.Context, campaignID uuid.UUID) {
 			return
 		}
 
-		text := personalize(campaign.Message, cc.Contact)
-		err := SendText(campaign.SessionPhone, campaign.TenantID.String(), cc.Contact.PhoneNumber, text)
+		// Pick message: use variants (round-robin) if approved, else original
+		msgTemplate := pickVariant(campaign.Variants, campaign.Message, idx)
+		text := personalize(msgTemplate, cc.Contact)
+		var err error
+		if len(campaign.MediaPayload) > 0 {
+			err = SendMedia(campaign.SessionPhone, campaign.TenantID.String(), cc.Contact.PhoneNumber, campaign.MediaPayload, campaign.MediaMime, campaign.MediaName, text)
+		} else {
+			err = SendText(campaign.SessionPhone, campaign.TenantID.String(), cc.Contact.PhoneNumber, text)
+		}
 
 		sentAt := time.Now()
 		if err != nil {
-			log.Printf("campaigns: failed to send to %s: %v", cc.Contact.PhoneNumber, err)
+			slog.Error("campaigns: send failed", "campaign_id", campaignID, "phone", cc.Contact.PhoneNumber, "error", err)
 			database.DB.Model(&cc).Updates(map[string]interface{}{
 				"status":    models.CampaignContactFailed,
 				"error_msg": err.Error(),
@@ -150,8 +205,7 @@ func run(ctx context.Context, campaignID uuid.UUID) {
 			campaign.SentCount++
 		}
 
-		// anti-spam jitter: 3-8 seconds
-		jitter := time.Duration(3+rand.Intn(6)) * time.Second
+		jitter := time.Duration(dMin+rand.Intn(spread)) * time.Second
 		select {
 		case <-ctx.Done():
 			return
@@ -165,5 +219,5 @@ func run(ctx context.Context, campaignID uuid.UUID) {
 			"status":       models.CampaignStatusCompleted,
 			"completed_at": &completedAt,
 		})
-	log.Printf("campaigns: campaign %s completed — sent:%d failed:%d", campaignID, campaign.SentCount, campaign.FailedCount)
+	slog.Info("campaigns: campaign completed", "campaign_id", campaignID, "sent", campaign.SentCount, "failed", campaign.FailedCount)
 }

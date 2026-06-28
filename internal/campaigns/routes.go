@@ -1,13 +1,14 @@
 package campaigns
 
 import (
+	"whatify/backend/internal/features"
 	"whatify/backend/internal/middleware"
 
 	"github.com/gin-gonic/gin"
 )
 
 func RegisterRoutes(v1 *gin.RouterGroup) {
-	g := v1.Group("/campaigns", middleware.Auth())
+	g := v1.Group("/campaigns", middleware.Auth(), middleware.RequireFeature(features.Campaigns))
 	g.GET("", listCampaigns)
 	g.POST("", createCampaign)
 	g.GET("/:id", getCampaign)

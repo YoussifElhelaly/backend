@@ -28,21 +28,25 @@ func register(req RegisterRequest) (*RegisterResponse, error) {
 		return nil, err
 	}
 
+	var user models.User
 	trialEnd := time.Now().Add(3 * 24 * time.Hour)
 	tenant := models.Tenant{Name: req.CompanyName, Plan: models.PlanStarter, TrialEndsAt: &trialEnd}
-	if err := database.DB.Create(&tenant).Error; err != nil {
-		return nil, err
-	}
 
-	user := models.User{
-		TenantID:        tenant.ID,
-		Name:            req.Name,
-		Email:           req.Email,
-		PasswordHash:    string(hash),
-		Role:            models.RoleAdmin,
-		IsEmailVerified: false,
-	}
-	if err := database.DB.Create(&user).Error; err != nil {
+	// Wrap tenant + user creation in a transaction to prevent orphaned tenants.
+	if err := database.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&tenant).Error; err != nil {
+			return err
+		}
+		user = models.User{
+			TenantID:        tenant.ID,
+			Name:            req.Name,
+			Email:           req.Email,
+			PasswordHash:    string(hash),
+			Role:            models.RoleAdmin,
+			IsEmailVerified: false,
+		}
+		return tx.Create(&user).Error
+	}); err != nil {
 		return nil, err
 	}
 

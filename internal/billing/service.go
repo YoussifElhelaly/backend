@@ -5,11 +5,48 @@ import (
 	"log"
 	"os"
 	"time"
+	"whatify/backend/internal/features"
 	"whatify/backend/internal/models"
 	"whatify/backend/pkg/database"
 
 	"github.com/google/uuid"
 )
+
+// FixTrialDates clears trial_ends_at for any tenant that has or previously had
+// a paid subscription. Runs at startup to repair bad existing data.
+func FixTrialDates() {
+	res := database.DB.Model(&models.Tenant{}).
+		Where("trial_ends_at IS NOT NULL AND (paypal_sub_id != '' OR plan_expires_at IS NOT NULL)").
+		Update("trial_ends_at", nil)
+	if res.RowsAffected > 0 {
+		log.Printf("billing: cleared stale trial_ends_at on %d tenant(s)", res.RowsAffected)
+	}
+}
+
+// SeedBuiltinPlans ensures the 3 built-in plans exist in the plan_defs table.
+func SeedBuiltinPlans() {
+	builtin := []models.PlanDef{
+		{Name: "STARTER", Label: "Starter", PriceUSD: 19, Sessions: 1, MessagesDay: 500, Agents: 2, IsCustom: false, IsActive: true,
+			Features: features.ToJSON(features.DefaultFeatures[models.PlanStarter])},
+		{Name: "GROWTH", Label: "Growth", PriceUSD: 49, Sessions: 5, MessagesDay: 5000, Agents: 10, IsCustom: false, IsActive: true,
+			Features: features.ToJSON(features.DefaultFeatures[models.PlanGrowth])},
+		{Name: "SCALE", Label: "Scale", PriceUSD: 99, Sessions: 20, MessagesDay: -1, Agents: -1, IsCustom: false, IsActive: true,
+			Features: features.ToJSON(features.DefaultFeatures[models.PlanScale])},
+	}
+	for _, p := range builtin {
+		var existing models.PlanDef
+		if err := database.DB.Where("name = ?", p.Name).First(&existing).Error; err != nil {
+			database.DB.Create(&p)
+		} else {
+			existingFeatures := features.ParseFeatures(existing.Features)
+			if len(existingFeatures) == 0 {
+				// Backfill features for existing built-in plans that were created before
+				// this feature, or that have empty/null/"[]" features.
+				database.DB.Model(&existing).Update("features", p.Features)
+			}
+		}
+	}
+}
 
 type CheckoutResult struct {
 	ApproveURL     string `json:"approve_url"`
@@ -103,6 +140,7 @@ func ActivateSubscription(paypalSubID string) error {
 			"plan_expires_at": expiresAt,
 			"paypal_sub_id":   paypalSubID,
 			"is_suspended":    false,
+			"trial_ends_at":   nil, // clear trial once user subscribes
 		}).Error; err != nil {
 		return fmt.Errorf("update tenant plan: %w", err)
 	}
@@ -221,9 +259,14 @@ type BillingInfo struct {
 	IsInTrial     bool                  `json:"is_in_trial"`
 	TrialDaysLeft int                   `json:"trial_days_left"`
 	HasActiveSub  bool                  `json:"has_active_sub"`
-	Limits        PlanLimits            `json:"limits"`
-	Usage         UsageStats            `json:"usage"`
-	Transactions  []models.Subscription `json:"transactions"`
+	// SubCancelled is true when user has cancelled their PayPal subscription but
+	// plan_expires_at is still in the future (they still have access).
+	SubCancelled bool       `json:"sub_cancelled"`
+	CancelsAt    *time.Time `json:"cancels_at,omitempty"`
+	IsSuspended  bool       `json:"is_suspended"`
+	Limits       PlanLimits            `json:"limits"`
+	Usage        UsageStats            `json:"usage"`
+	Transactions []models.Subscription `json:"transactions"`
 }
 
 type UsageStats struct {
@@ -255,10 +298,26 @@ func GetBillingInfo(tenantID uuid.UUID) (*BillingInfo, error) {
 		Limit(10).
 		Find(&transactions)
 
-	isInTrial := tenant.TrialEndsAt != nil && time.Now().Before(*tenant.TrialEndsAt) && tenant.PaypalSubID == ""
+	now := time.Now()
+
+	// In trial only when: trial still running + never paid (plan_expires_at nil) + no active sub
+	isInTrial := tenant.TrialEndsAt != nil &&
+		now.Before(*tenant.TrialEndsAt) &&
+		tenant.PaypalSubID == "" &&
+		tenant.PlanExpiresAt == nil
 	trialDaysLeft := 0
 	if isInTrial {
 		trialDaysLeft = int(time.Until(*tenant.TrialEndsAt).Hours()/24) + 1
+	}
+
+	hasActiveSub := tenant.PaypalSubID != ""
+
+	// SubCancelled: no active PayPal sub but plan_expires_at is still in the future.
+	// This means they cancelled but still have access until the period ends.
+	subCancelled := !hasActiveSub && tenant.PlanExpiresAt != nil && now.Before(*tenant.PlanExpiresAt) && tenant.Plan != models.PlanStarter
+	var cancelsAt *time.Time
+	if subCancelled {
+		cancelsAt = tenant.PlanExpiresAt
 	}
 
 	return &BillingInfo{
@@ -267,7 +326,10 @@ func GetBillingInfo(tenantID uuid.UUID) (*BillingInfo, error) {
 		TrialEndsAt:   tenant.TrialEndsAt,
 		IsInTrial:     isInTrial,
 		TrialDaysLeft: trialDaysLeft,
-		HasActiveSub:  tenant.PaypalSubID != "",
+		HasActiveSub:  hasActiveSub,
+		SubCancelled:  subCancelled,
+		CancelsAt:     cancelsAt,
+		IsSuspended:   tenant.IsSuspended,
 		Limits:        limits,
 		Usage: UsageStats{
 			Sessions: int(sessionCount),

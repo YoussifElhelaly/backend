@@ -24,7 +24,8 @@ func MigrateSessionPhone() {
 }
 
 // FunnelReplyHandler is wired from the funnels package to avoid import cycles.
-var FunnelReplyHandler func(contactID, tenantID uuid.UUID)
+// Returns true if the contact was advanced inside a funnel (flows should be skipped).
+var FunnelReplyHandler func(contactID, tenantID uuid.UUID) bool
 
 // FlowHandler is wired from the flows package to avoid import cycles.
 var FlowHandler func(tenantID uuid.UUID, sessionPhone string, contactID uuid.UUID, contact *models.Contact, conversationID uuid.UUID, text string, isNew bool)
@@ -41,6 +42,8 @@ func HandleIncoming(
 	mediaPayload []byte,
 	reactionToID string,
 	isFromMe bool,
+	chatType models.ChatType,
+	groupName, groupJID string,
 ) {
 	// Skip duplicate — message already saved via Whatify send API.
 	if isFromMe && waMessageID != "" {
@@ -56,7 +59,7 @@ func HandleIncoming(
 		return
 	}
 
-	conv := findOrCreateConversation(tenantID, sessionID, contact.ID, sessionPhone)
+	conv := findOrCreateConversation(tenantID, sessionID, contact.ID, sessionPhone, chatType, groupName, groupJID)
 	if conv == nil {
 		return
 	}
@@ -113,13 +116,20 @@ func HandleIncoming(
 		"timestamp":       timestamp.Format(time.RFC3339),
 	})
 
-	// Trigger funnel auto-advance if contact is in an active funnel
-	if FunnelReplyHandler != nil {
-		go FunnelReplyHandler(contact.ID, tenantID)
+	// Flows and funnels only apply to individual conversations.
+	if chatType != models.ChatTypeIndividual {
+		return
 	}
 
-	// Trigger flow automation
-	if FlowHandler != nil {
+	// Funnel takes priority: if the contact is in an active funnel, advance them
+	// and skip normal flow automation entirely.
+	inFunnel := false
+	if FunnelReplyHandler != nil {
+		inFunnel = FunnelReplyHandler(contact.ID, tenantID)
+	}
+
+	// Only trigger flow automation when the contact is not being handled by a funnel
+	if !inFunnel && FlowHandler != nil {
 		go FlowHandler(tenantID, sessionPhone, contact.ID, contact, conv.ID, content, isNewContact)
 	}
 }
@@ -153,18 +163,30 @@ func findOrCreateContactTracked(tenantID, sessionID uuid.UUID, phone, pushName s
 	return &c
 }
 
-func findOrCreateConversation(tenantID, sessionID uuid.UUID, contactID uuid.UUID, sessionPhone string) *models.Conversation {
+func findOrCreateConversation(tenantID, sessionID uuid.UUID, contactID uuid.UUID, sessionPhone string, chatType models.ChatType, groupName, groupJID string) *models.Conversation {
 	var conv models.Conversation
-	// Conversations are scoped to a specific business phone number so that
-	// two different sessions (numbers) each get their own conversation thread
-	// with the same customer. session_phone never changes even if the session
-	// record is deleted and recreated; session_id is refreshed if it drifted.
-	if err := database.DB.Where("tenant_id = ? AND contact_id = ? AND session_phone = ?", tenantID, contactID, sessionPhone).First(&conv).Error; err == nil {
+	// For groups/broadcasts key on group_jid; for individual key on (contact_id, session_phone).
+	var err error
+	if groupJID != "" {
+		err = database.DB.Where("tenant_id = ? AND group_jid = ? AND session_phone = ?", tenantID, groupJID, sessionPhone).First(&conv).Error
+	} else {
+		err = database.DB.Where("tenant_id = ? AND contact_id = ? AND session_phone = ?", tenantID, contactID, sessionPhone).First(&conv).Error
+	}
+	if err == nil {
+		updates := map[string]interface{}{}
 		if conv.SessionID != sessionID {
-			database.DB.Model(&conv).Update("session_id", sessionID)
-			conv.SessionID = sessionID
+			updates["session_id"] = sessionID
+		}
+		if groupName != "" && conv.GroupName != groupName {
+			updates["group_name"] = groupName
+		}
+		if len(updates) > 0 {
+			database.DB.Model(&conv).Updates(updates)
 		}
 		return &conv
+	}
+	if chatType == "" {
+		chatType = models.ChatTypeIndividual
 	}
 	conv = models.Conversation{
 		TenantID:     tenantID,
@@ -172,6 +194,9 @@ func findOrCreateConversation(tenantID, sessionID uuid.UUID, contactID uuid.UUID
 		SessionPhone: sessionPhone,
 		ContactID:    contactID,
 		Status:       models.ConvStatusOpen,
+		ChatType:     chatType,
+		GroupName:    groupName,
+		GroupJID:     groupJID,
 	}
 	if err := database.DB.Create(&conv).Error; err != nil {
 		return nil
@@ -179,12 +204,17 @@ func findOrCreateConversation(tenantID, sessionID uuid.UUID, contactID uuid.UUID
 	return &conv
 }
 
-func getConversations(tenantID uuid.UUID, page, limit int, sessionPhone string) ([]ConversationResponse, error) {
+func getConversations(tenantID uuid.UUID, page, limit int, sessionPhone, chatType string) ([]ConversationResponse, error) {
 	offset := (page - 1) * limit
 	var convs []models.Conversation
 	q := database.DB.Preload("Contact").Where("tenant_id = ?", tenantID)
 	if sessionPhone != "" {
 		q = q.Where("session_phone = ?", sessionPhone)
+	}
+	if chatType != "" {
+		q = q.Where("chat_type = ?", chatType)
+	} else {
+		// Default: return all types (individual + group + broadcast)
 	}
 	if err := q.
 		Order("last_message_at DESC NULLS LAST").
@@ -193,14 +223,44 @@ func getConversations(tenantID uuid.UUID, page, limit int, sessionPhone string) 
 		return nil, err
 	}
 
+	// Batch-load last messages in a single query instead of N+1.
+	convIDs := make([]interface{}, len(convs))
+	for i, c := range convs {
+		convIDs[i] = c.ID
+	}
+	type lastMsgRow struct {
+		ConversationID uuid.UUID
+		ID             uuid.UUID
+		Content        string
+		Type           string
+		Direction      string
+		Timestamp      time.Time
+	}
+	var lastMsgs []lastMsgRow
+	if len(convIDs) > 0 {
+		database.DB.Raw(`
+			SELECT DISTINCT ON (conversation_id)
+				conversation_id, id, content, type, direction, timestamp
+			FROM messages
+			WHERE conversation_id IN ?
+			ORDER BY conversation_id, timestamp DESC
+		`, convIDs).Find(&lastMsgs)
+	}
+	lastMsgMap := map[uuid.UUID]*models.Message{}
+	for _, row := range lastMsgs {
+		lastMsgMap[row.ConversationID] = &models.Message{
+			ID:             row.ID,
+			ConversationID: row.ConversationID,
+			Content:        row.Content,
+			Type:           models.MessageType(row.Type),
+			Direction:      models.MessageDirection(row.Direction),
+			Timestamp:      row.Timestamp,
+		}
+	}
+
 	out := make([]ConversationResponse, len(convs))
 	for i, c := range convs {
-		var lastMsg models.Message
-		var lastMsgPtr *models.Message
-		if res := database.DB.Where("conversation_id = ?", c.ID).Order("timestamp desc").Limit(1).First(&lastMsg); res.Error == nil {
-			lastMsgPtr = &lastMsg
-		}
-		out[i] = toConvResponse(c, lastMsgPtr)
+		out[i] = toConvResponse(c, lastMsgMap[c.ID])
 	}
 	return out, nil
 }
@@ -340,12 +400,78 @@ func markRead(tenantID, conversationID uuid.UUID) error {
 		Update("unread_count", 0).Error
 }
 
+// getDelta returns all messages newer than `since` for the tenant, plus the
+// affected conversations. Called when a client reconnects and requests a delta.
+func getDelta(tenantID uuid.UUID, since time.Time, page, limit int) ([]ConversationResponse, []MessageResponse, error) {
+	offset := (page - 1) * limit
+
+	// 1. Messages inserted on the server since the given time.
+	// Use created_at (server insertion time) not timestamp (WhatsApp message time)
+	// so HistorySync messages with old WA timestamps don't get skipped.
+	var msgs []models.Message
+	if err := database.DB.
+		Where("tenant_id = ? AND created_at > ?", tenantID, since).
+		Order("timestamp ASC").
+		Limit(limit).Offset(offset).
+		Find(&msgs).Error; err != nil {
+		return nil, nil, err
+	}
+
+	// 2. Distinct conversations that have new messages
+	convIDs := make([]interface{}, 0, len(msgs))
+	seen := map[string]bool{}
+	for _, m := range msgs {
+		id := m.ConversationID.String()
+		if !seen[id] {
+			seen[id] = true
+			convIDs = append(convIDs, m.ConversationID)
+		}
+	}
+
+	var convs []models.Conversation
+	if len(convIDs) > 0 {
+		if err := database.DB.Preload("Contact").
+			Where("id IN ?", convIDs).
+			Find(&convs).Error; err != nil {
+			return nil, nil, err
+		}
+	}
+
+	// Build last-message map for conv responses
+	lastMsgMap := map[string]*models.Message{}
+	for i := range msgs {
+		cid := msgs[i].ConversationID.String()
+		if _, ok := lastMsgMap[cid]; !ok {
+			lastMsgMap[cid] = &msgs[i]
+		}
+	}
+
+	convOut := make([]ConversationResponse, len(convs))
+	for i, c := range convs {
+		convOut[i] = toConvResponse(c, lastMsgMap[c.ID.String()])
+	}
+
+	msgOut := make([]MessageResponse, len(msgs))
+	for i, m := range msgs {
+		msgOut[i] = toMsgResponse(m)
+	}
+
+	return convOut, msgOut, nil
+}
+
 func toConvResponse(c models.Conversation, lastMsg *models.Message) ConversationResponse {
+	chatType := string(c.ChatType)
+	if chatType == "" {
+		chatType = string(models.ChatTypeIndividual)
+	}
 	r := ConversationResponse{
 		ID:           c.ID.String(),
 		SessionID:    c.SessionID.String(),
 		SessionPhone: c.SessionPhone,
 		Status:       string(c.Status),
+		ChatType:     chatType,
+		GroupName:    c.GroupName,
+		GroupJID:     c.GroupJID,
 		UnreadCount:  c.UnreadCount,
 		UpdatedAt:    c.UpdatedAt.Format(time.RFC3339),
 		CreatedAt:    c.CreatedAt.Format(time.RFC3339),

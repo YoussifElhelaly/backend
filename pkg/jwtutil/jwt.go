@@ -60,9 +60,5 @@ func ValidateSecret() {
 }
 
 func secret() string {
-	if s := os.Getenv("JWT_SECRET"); s != "" {
-		return s
-	}
-	// Fallback only reached in local dev when JWT_SECRET is intentionally omitted.
-	return "change-me-in-production"
+	return os.Getenv("JWT_SECRET")
 }

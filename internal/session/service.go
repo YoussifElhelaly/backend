@@ -35,6 +35,27 @@ func create(tenantID uuid.UUID, req CreateSessionRequest) (*models.WhatsAppSessi
 	return &s, nil
 }
 
+func updateSession(tenantID uuid.UUID, sessionID string, proxyURL *string) (*models.WhatsAppSession, error) {
+	id, err := uuid.Parse(sessionID)
+	if err != nil {
+		return nil, errors.New("invalid session id")
+	}
+
+	var s models.WhatsAppSession
+	if err := database.DB.Where("id = ? AND tenant_id = ?", id, tenantID).First(&s).Error; err != nil {
+		return nil, errors.New("session not found")
+	}
+
+	if proxyURL != nil {
+		s.ProxyURL = *proxyURL
+		if err := database.DB.Model(&s).Update("proxy_url", *proxyURL).Error; err != nil {
+			return nil, err
+		}
+	}
+
+	return &s, nil
+}
+
 func deleteSession(tenantID uuid.UUID, sessionID string) error {
 	id, err := uuid.Parse(sessionID)
 	if err != nil {

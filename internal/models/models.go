@@ -23,16 +23,19 @@ const (
 )
 
 type Tenant struct {
-	ID            uuid.UUID      `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
-	Name          string         `gorm:"not null"                                       json:"name"`
-	Plan          Plan           `gorm:"not null;default:'STARTER'"                    json:"plan"`
-	PlanExpiresAt *time.Time     `json:"plan_expires_at,omitempty"`
-	TrialEndsAt   *time.Time     `json:"trial_ends_at,omitempty"`
-	IsSuspended   bool           `gorm:"default:false"                                  json:"is_suspended"`
-	PaypalSubID   string         `gorm:"default:''"                                     json:"paypal_sub_id,omitempty"`
-	CreatedAt     time.Time      `json:"created_at"`
-	UpdatedAt     time.Time      `json:"updated_at"`
-	DeletedAt     gorm.DeletedAt `gorm:"index"                                          json:"-"`
+	ID                uuid.UUID      `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	Name              string         `gorm:"not null"                                       json:"name"`
+	Plan              Plan           `gorm:"not null;default:'STARTER'"                    json:"plan"`
+	PlanExpiresAt     *time.Time     `json:"plan_expires_at,omitempty"`
+	TrialEndsAt       *time.Time     `json:"trial_ends_at,omitempty"`
+	IsSuspended       bool           `gorm:"default:false"                                  json:"is_suspended"`
+	PaypalSubID       string         `gorm:"default:''"                                     json:"paypal_sub_id,omitempty"`
+	CampaignDelayMin  int            `gorm:"default:3"                                      json:"campaign_delay_min"`
+	CampaignDelayMax  int            `gorm:"default:8"                                      json:"campaign_delay_max"`
+	DailyMessageLimit int            `gorm:"default:25"                                     json:"daily_message_limit"`
+	CreatedAt         time.Time      `json:"created_at"`
+	UpdatedAt         time.Time      `json:"updated_at"`
+	DeletedAt         gorm.DeletedAt `gorm:"index"                                          json:"-"`
 }
 
 type User struct {
@@ -111,11 +114,20 @@ const (
 	ConvStatusResolved ConversationStatus = "RESOLVED"
 )
 
+type ChatType string
+
+const (
+	ChatTypeIndividual ChatType = "individual"
+	ChatTypeGroup      ChatType = "group"
+	ChatTypeBroadcast  ChatType = "broadcast"
+)
+
 type Tag struct {
 	ID        uuid.UUID      `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
 	TenantID  uuid.UUID      `gorm:"type:uuid;not null;index"                       json:"tenant_id"`
 	Name      string         `gorm:"not null"                                       json:"name"`
 	Color     string         `gorm:"default:'#3B82F6'"                              json:"color"`
+	Contacts  []Contact      `gorm:"many2many:contact_tags;"                        json:"contacts,omitempty"`
 	CreatedAt time.Time      `json:"created_at"`
 	UpdatedAt time.Time      `json:"updated_at"`
 	DeletedAt gorm.DeletedAt `gorm:"index"                                          json:"-"`
@@ -124,7 +136,7 @@ type Tag struct {
 type Contact struct {
 	ID          uuid.UUID      `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
 	TenantID    uuid.UUID      `gorm:"type:uuid;not null;index"                       json:"tenant_id"`
-	SessionID   uuid.UUID      `gorm:"type:uuid;not null"                             json:"session_id"`
+	SessionID   uuid.UUID      `gorm:"type:uuid;not null;index"                       json:"session_id"`
 	PhoneNumber string         `gorm:"not null"                                       json:"phone_number"`
 	Name        string         `gorm:"default:''"                                     json:"name"`
 	PushName    string         `gorm:"default:''"                                     json:"push_name"`
@@ -140,11 +152,14 @@ type Contact struct {
 type Conversation struct {
 	ID            uuid.UUID          `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
 	TenantID      uuid.UUID          `gorm:"type:uuid;not null;index"                       json:"tenant_id"`
-	SessionID     uuid.UUID          `gorm:"type:uuid;not null"                             json:"session_id"`
+	SessionID     uuid.UUID          `gorm:"type:uuid;not null;index"                       json:"session_id"`
 	SessionPhone  string             `gorm:"default:''"                                     json:"session_phone"`
-	ContactID     uuid.UUID          `gorm:"type:uuid;not null"                             json:"contact_id"`
-	Contact       Contact            `gorm:"foreignKey:ContactID"                           json:"contact"`
+	ContactID     uuid.UUID          `gorm:"type:uuid;not null;index"                       json:"contact_id"`
+	Contact       Contact            `gorm:"foreignKey:ContactID;constraint:OnDelete:CASCADE" json:"contact"`
 	Status        ConversationStatus `gorm:"not null;default:'OPEN'"                        json:"status"`
+	ChatType      ChatType           `gorm:"default:'individual'"                           json:"chat_type"`
+	GroupName     string             `gorm:"default:''"                                     json:"group_name"`
+	GroupJID      string             `gorm:"default:''"                                     json:"group_jid"`
 	AssignedTo    *uuid.UUID         `gorm:"type:uuid"                                      json:"assigned_to"`
 	UnreadCount   int                `gorm:"default:0"                                      json:"unread_count"`
 	LastMessageAt *time.Time         `gorm:"index"                                          json:"last_message_at"`
@@ -163,9 +178,9 @@ type Message struct {
 	MediaURL       string           `gorm:"default:''"                                     json:"media_url,omitempty"`
 	MediaPayload   []byte           `gorm:"type:bytea"                                     json:"-"`
 	ReactionToID   string           `gorm:"default:''"                                     json:"reaction_to_id,omitempty"`
-	Direction      MessageDirection `gorm:"not null"                                       json:"direction"`
+	Direction      MessageDirection `gorm:"not null;index"                                 json:"direction"`
 	Status         MessageStatus    `gorm:"not null;default:'SENT'"                        json:"status"`
-	WaMessageID    string           `gorm:"default:''"                                     json:"wa_message_id,omitempty"`
+	WaMessageID    string           `gorm:"default:'';index"                               json:"wa_message_id,omitempty"`
 	IsNote         bool             `gorm:"default:false"                                  json:"is_note"`
 	Timestamp      time.Time        `json:"timestamp"`
 	CreatedAt      time.Time        `json:"created_at"`
@@ -233,6 +248,10 @@ type Campaign struct {
 	SessionPhone  string         `gorm:"not null"                                       json:"session_phone"`
 	Name          string         `gorm:"not null"                                       json:"name"`
 	Message       string         `gorm:"type:text;not null"                             json:"message"`
+	Variants      string         `gorm:"type:text;default:'[]'"                         json:"variants"` // JSON []string — AI-generated clones
+	MediaPayload  []byte         `gorm:"type:bytea"                                     json:"-"`
+	MediaMime     string         `gorm:"default:''"                                     json:"media_mime,omitempty"`
+	MediaName     string         `gorm:"default:''"                                     json:"media_name,omitempty"`
 	Status        CampaignStatus `gorm:"not null;default:'DRAFT'"                       json:"status"`
 	ScheduledAt   *time.Time     `json:"scheduled_at,omitempty"`
 	StartedAt     *time.Time     `json:"started_at,omitempty"`
@@ -307,35 +326,50 @@ const (
 	FunnelContactDropped   FunnelContactStatus = "DROPPED"
 )
 
+type FunnelTimeoutAction string
+
+const (
+	FunnelTimeoutNone     FunnelTimeoutAction = "NONE"
+	FunnelTimeoutAutoDrop FunnelTimeoutAction = "AUTO_DROP"
+	FunnelTimeoutFollowUp FunnelTimeoutAction = "FOLLOW_UP"
+)
+
 type Funnel struct {
-	ID               uuid.UUID      `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
-	TenantID         uuid.UUID      `gorm:"type:uuid;not null;index"                       json:"tenant_id"`
-	SessionPhone     string         `gorm:"not null"                                       json:"session_phone"`
-	Name             string         `gorm:"not null"                                       json:"name"`
-	Description      string         `gorm:"default:''"                                     json:"description,omitempty"`
-	Status           FunnelStatus   `gorm:"not null;default:'DRAFT'"                       json:"status"`
-	ReplyWindowHours int            `gorm:"default:48"                                     json:"reply_window_hours"`
-	Steps            []FunnelStep   `gorm:"foreignKey:FunnelID"                            json:"steps,omitempty"`
-	ContactCount     int            `gorm:"-"                                              json:"contact_count,omitempty"`
-	CreatedAt        time.Time      `json:"created_at"`
-	UpdatedAt        time.Time      `json:"updated_at"`
-	DeletedAt        gorm.DeletedAt `gorm:"index"                                          json:"-"`
+	ID               uuid.UUID          `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	TenantID         uuid.UUID          `gorm:"type:uuid;not null;index"                       json:"tenant_id"`
+	SessionPhone     string             `gorm:"not null"                                       json:"session_phone"`
+	Name             string             `gorm:"not null"                                       json:"name"`
+	Description      string             `gorm:"default:''"                                     json:"description,omitempty"`
+	Status           FunnelStatus       `gorm:"not null;default:'DRAFT'"                       json:"status"`
+	ReplyWindowHours int                `gorm:"default:48"                                     json:"reply_window_hours"`
+	TimeoutAction    FunnelTimeoutAction `gorm:"not null;default:'NONE'"                       json:"timeout_action"`
+	FollowUpMessage  string             `gorm:"type:text;default:''"                           json:"follow_up_message,omitempty"`
+	Steps            []FunnelStep       `gorm:"foreignKey:FunnelID"                            json:"steps,omitempty"`
+	ContactCount     int                `gorm:"-"                                              json:"contact_count,omitempty"`
+	CreatedAt        time.Time          `json:"created_at"`
+	UpdatedAt        time.Time          `json:"updated_at"`
+	DeletedAt        gorm.DeletedAt     `gorm:"index"                                          json:"-"`
 }
 
 type FunnelStep struct {
 	ID        uuid.UUID      `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
 	FunnelID  uuid.UUID      `gorm:"type:uuid;not null;index"                       json:"funnel_id"`
-	Order     int            `gorm:"not null"                                       json:"order"`
-	Name      string         `gorm:"not null"                                       json:"name"`
-	Type      FunnelStepType `gorm:"not null"                                       json:"type"`
-	Message   string         `gorm:"type:text;default:''"                           json:"message,omitempty"`
-	CreatedAt time.Time      `json:"created_at"`
-	DeletedAt gorm.DeletedAt `gorm:"index"                                          json:"-"`
+	Order        int            `gorm:"not null"                                    json:"order"`
+	Name         string         `gorm:"not null"                                    json:"name"`
+	Type         FunnelStepType `gorm:"not null"                                    json:"type"`
+	Message      string         `gorm:"type:text;default:''"                        json:"message,omitempty"`
+	Variants     string         `gorm:"type:text;default:'[]'"                      json:"variants"` // JSON []string
+	MediaPayload []byte         `gorm:"type:bytea"                                  json:"-"`
+	MediaMime    string         `gorm:"default:''"                                  json:"media_mime,omitempty"`
+	MediaName    string         `gorm:"default:''"                                  json:"media_name,omitempty"`
+	CreatedAt    time.Time      `json:"created_at"`
+	DeletedAt    gorm.DeletedAt `gorm:"index"                                       json:"-"`
 }
 
 type FunnelContact struct {
 	ID            uuid.UUID           `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
 	FunnelID      uuid.UUID           `gorm:"type:uuid;not null;index"                       json:"funnel_id"`
+	Funnel        Funnel              `gorm:"foreignKey:FunnelID"                            json:"-"`
 	ContactID     uuid.UUID           `gorm:"type:uuid;not null"                             json:"contact_id"`
 	Contact       Contact             `gorm:"foreignKey:ContactID"                           json:"contact"`
 	CurrentStepID uuid.UUID           `gorm:"type:uuid;not null"                             json:"current_step_id"`
@@ -351,7 +385,9 @@ type FunnelContactHistory struct {
 	FunnelID   uuid.UUID  `gorm:"type:uuid;not null;index"                       json:"funnel_id"`
 	ContactID  uuid.UUID  `gorm:"type:uuid;not null"                             json:"contact_id"`
 	FromStepID *uuid.UUID `gorm:"type:uuid"                                      json:"from_step_id,omitempty"`
+	FromStep   *FunnelStep `gorm:"foreignKey:FromStepID"                         json:"from_step,omitempty"`
 	ToStepID   uuid.UUID  `gorm:"type:uuid;not null"                             json:"to_step_id"`
+	ToStep     FunnelStep `gorm:"foreignKey:ToStepID"                            json:"to_step"`
 	Trigger    string     `gorm:"not null;default:'MANUAL'"                      json:"trigger"`
 	MovedBy    *uuid.UUID `gorm:"type:uuid"                                      json:"moved_by,omitempty"`
 	CreatedAt  time.Time  `json:"created_at"`
@@ -396,21 +432,49 @@ const (
 )
 
 type Flow struct {
-	ID           uuid.UUID      `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
-	TenantID     uuid.UUID      `gorm:"type:uuid;not null;index"                       json:"tenant_id"`
-	SessionPhone string         `gorm:"default:''"                                     json:"session_phone"`
-	Name         string         `gorm:"not null"                                       json:"name"`
-	Trigger      FlowTrigger    `gorm:"not null"                                       json:"trigger"`
-	Keyword      string         `gorm:"default:''"                                     json:"keyword,omitempty"`
-	Nodes        string         `gorm:"type:text;default:'[]'"                         json:"nodes"`
-	IsActive     bool           `gorm:"default:true"                                   json:"is_active"`
-	RunCount     int            `gorm:"default:0"                                      json:"run_count"`
-	CreatedAt    time.Time      `json:"created_at"`
-	UpdatedAt    time.Time      `json:"updated_at"`
-	DeletedAt    gorm.DeletedAt `gorm:"index"                                          json:"-"`
+	ID               uuid.UUID      `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	TenantID         uuid.UUID      `gorm:"type:uuid;not null;index"                       json:"tenant_id"`
+	SessionPhone     string         `gorm:"default:''"                                     json:"session_phone"`
+	Name             string         `gorm:"not null"                                       json:"name"`
+	Trigger          FlowTrigger    `gorm:"not null"                                       json:"trigger"`
+	Keyword          string         `gorm:"default:''"                                     json:"keyword,omitempty"`
+	KeywordMatchType string         `gorm:"default:'contains'"                             json:"keyword_match_type"` // contains | exact | starts_with
+	CooldownSeconds  int            `gorm:"default:0"                                      json:"cooldown_seconds"`   // 0 = no cooldown
+	Nodes            string         `gorm:"type:text;default:'[]'"                         json:"nodes"`
+	MediaPayload     []byte         `gorm:"type:bytea"                                     json:"-"`
+	MediaMime        string         `gorm:"default:''"                                     json:"media_mime,omitempty"`
+	MediaName        string         `gorm:"default:''"                                     json:"media_name,omitempty"`
+	IsActive         bool           `gorm:"default:true"                                   json:"is_active"`
+	RunCount         int            `gorm:"default:0"                                      json:"run_count"`
+	CreatedAt        time.Time      `json:"created_at"`
+	UpdatedAt        time.Time      `json:"updated_at"`
+	DeletedAt        gorm.DeletedAt `gorm:"index"                                          json:"-"`
 }
 
 func (f *Flow) BeforeCreate(tx *gorm.DB) error {
+	if f.ID == uuid.Nil {
+		f.ID = uuid.New()
+	}
+	return nil
+}
+
+// ─── Flow Runs ────────────────────────────────────────────────────────────────
+
+type FlowRun struct {
+	ID           uuid.UUID  `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	FlowID       uuid.UUID  `gorm:"type:uuid;not null;index"                        json:"flow_id"`
+	TenantID     uuid.UUID  `gorm:"type:uuid;not null;index"                        json:"tenant_id"`
+	ContactID    *uuid.UUID `gorm:"type:uuid"                                        json:"contact_id"`
+	ContactName  string     `gorm:"-"                                                json:"contact_name"`
+	ContactPhone string     `gorm:"-"                                                json:"contact_phone"`
+	TriggerMsg   string     `gorm:"column:trigger_message;type:text"                 json:"trigger_message"`
+	Status       string     `gorm:"not null;default:'completed'"                     json:"status"` // completed | failed | partial
+	Actions      string     `gorm:"type:text;default:'[]'"                           json:"actions"` // JSON [{type,detail,status,error}]
+	ExecutedAt   time.Time  `gorm:"not null;index"                                   json:"executed_at"`
+	CreatedAt    time.Time  `json:"created_at"`
+}
+
+func (f *FlowRun) BeforeCreate(tx *gorm.DB) error {
 	if f.ID == uuid.Nil {
 		f.ID = uuid.New()
 	}
@@ -608,4 +672,50 @@ type PlatformSetting struct {
 	Key       string    `gorm:"primaryKey"    json:"key"`
 	Value     string    `gorm:"not null"      json:"value"`
 	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// ─── AI Configuration ─────────────────────────────────────────────────────────
+
+type AIConfig struct {
+	ID           uuid.UUID      `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	TenantID     uuid.UUID      `gorm:"type:uuid;not null;uniqueIndex"                 json:"tenant_id"`
+	Platform     string         `gorm:"not null;default:'openai'"                      json:"platform"` // openai | anthropic | gemini
+	Model        string         `gorm:"not null;default:'gpt-4o-mini'"                 json:"model"`
+	EncryptedKey string         `gorm:"type:text;not null;default:''"                  json:"-"`
+	KeyHint      string         `gorm:"default:''"                                     json:"key_hint"` // last 4 chars shown in UI
+	IsActive     bool           `gorm:"default:true"                                   json:"is_active"`
+	CreatedAt    time.Time      `json:"created_at"`
+	UpdatedAt    time.Time      `json:"updated_at"`
+	DeletedAt    gorm.DeletedAt `gorm:"index"                                          json:"-"`
+}
+
+func (a *AIConfig) BeforeCreate(tx *gorm.DB) error {
+	if a.ID == uuid.Nil {
+		a.ID = uuid.New()
+	}
+	return nil
+}
+
+// ─── Plan Definitions (Admin-manageable) ─────────────────────────────────────
+
+type PlanDef struct {
+	ID           uuid.UUID `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	Name         string    `gorm:"not null;uniqueIndex"                          json:"name"`
+	Label        string    `gorm:"not null"                                      json:"label"`
+	PriceUSD     float64   `gorm:"not null"                                      json:"price_usd"`
+	Sessions     int       `gorm:"not null;default:1"                            json:"sessions"`
+	MessagesDay  int       `gorm:"not null;default:500"                          json:"messages_day"`
+	Agents       int       `gorm:"not null;default:2"                            json:"agents"`
+	Features     string    `gorm:"type:text;default:'[]'"                        json:"features"`
+	IsCustom     bool      `gorm:"default:false"                                 json:"is_custom"`
+	IsActive     bool      `gorm:"default:true"                                  json:"is_active"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+func (p *PlanDef) BeforeCreate(tx *gorm.DB) error {
+	if p.ID == uuid.Nil {
+		p.ID = uuid.New()
+	}
+	return nil
 }

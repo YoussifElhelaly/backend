@@ -3,8 +3,9 @@ package inbox
 import (
 	"context"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/coder/websocket"
 )
@@ -41,6 +42,10 @@ func (h *Hub) unregister(c *wsConn) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	delete(h.conns[c.tenantID], c)
+	// Clean up empty tenant bucket to prevent memory leak.
+	if len(h.conns[c.tenantID]) == 0 {
+		delete(h.conns, c.tenantID)
+	}
 }
 
 func (h *Hub) Broadcast(tenantID string, event WSEvent) {
@@ -58,9 +63,21 @@ func (h *Hub) Broadcast(tenantID string, event WSEvent) {
 
 	for _, c := range conns {
 		go func(c *wsConn) {
-			if err := c.ws.Write(context.Background(), websocket.MessageText, data); err != nil {
-				log.Printf("ws write error: %v", err)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := c.ws.Write(ctx, websocket.MessageText, data); err != nil {
+				slog.Debug("ws write error", "tenant_id", tenantID, "error", err)
 			}
 		}(c)
 	}
+}
+
+func (h *Hub) SendTo(c *wsConn, event WSEvent) {
+	data, err := json.Marshal(event)
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c.ws.Write(ctx, websocket.MessageText, data)
 }

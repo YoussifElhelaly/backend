@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -14,6 +14,9 @@ import (
 	"whatify/backend/internal/models"
 	"whatify/backend/pkg/database"
 )
+
+// payPalClient is an HTTP client with a 30-second timeout for all PayPal API calls.
+var payPalClient = &http.Client{Timeout: 30 * time.Second}
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -67,7 +70,7 @@ func getPayPalPlanID(plan models.Plan) (string, error) {
 			return setting.Value, nil
 		}
 		// Plan is not active — delete from DB so SetupPayPalPlans recreates it.
-		log.Printf("billing: plan %s (plan_id=%s) is not ACTIVE on PayPal — will recreate", plan, setting.Value)
+		slog.Warn("billing: plan not ACTIVE on PayPal, will recreate", "plan", plan, "plan_id", setting.Value)
 		database.DB.Delete(&setting)
 	}
 
@@ -85,7 +88,7 @@ func getAccessToken() (string, error) {
 	req.SetBasicAuth(paypalClientID(), paypalClientSecret())
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := payPalClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("paypal auth: %w", err)
 	}
@@ -110,7 +113,7 @@ func ppPost(token, path string, body interface{}, out interface{}) (int, []byte,
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := payPalClient.Do(req)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -127,7 +130,7 @@ func ppGet(token, path string, out interface{}) (int, []byte, error) {
 	req, _ := http.NewRequest("GET", paypalBase()+path, nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := payPalClient.Do(req)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -150,11 +153,10 @@ func ppGet(token, path string, out interface{}) (int, []byte, error) {
 // Safe to call at every startup — idempotent.
 func SetupPayPalPlans() {
 	if paypalClientID() == "" || paypalClientSecret() == "" {
-		log.Println("billing: PAYPAL_CLIENT_ID/SECRET not set — PayPal billing disabled")
+		slog.Warn("billing: PAYPAL_CLIENT_ID/SECRET not set — PayPal billing disabled")
 		return
 	}
-	log.Printf("billing: PayPal configured (sandbox=%s, client_id=%.8s...)",
-		os.Getenv("PAYPAL_SANDBOX"), paypalClientID())
+	slog.Info("billing: PayPal configured", "sandbox", os.Getenv("PAYPAL_SANDBOX"), "client_id", paypalClientID())
 
 	type planDef struct {
 		plan     models.Plan
@@ -175,41 +177,41 @@ func SetupPayPalPlans() {
 		if err != nil || id == "" {
 			missing = append(missing, d)
 		} else {
-			log.Printf("billing: plan %s → %s (resolved)", d.plan, id)
+			slog.Info("billing: plan resolved", "plan", d.plan, "plan_id", id)
 		}
 	}
 
 	if len(missing) == 0 {
-		log.Println("billing: all PayPal plans ready")
+		slog.Info("billing: all PayPal plans ready")
 		return
 	}
 
 	// Need to create missing plans via PayPal API.
-	log.Printf("billing: creating %d missing PayPal plan(s)...", len(missing))
+	slog.Info("billing: creating missing PayPal plans", "count", len(missing))
 
 	token, err := getAccessToken()
 	if err != nil {
-		log.Printf("billing: PayPal auth failed — billing disabled: %v", err)
+		slog.Error("billing: PayPal auth failed — billing disabled", "error", err)
 		return
 	}
 
 	// Create (or reuse) a product.
 	productID := getOrCreateProduct(token)
 	if productID == "" {
-		log.Println("billing: could not get/create PayPal product — billing disabled")
+		slog.Warn("billing: could not get/create PayPal product — billing disabled")
 		return
 	}
 
 	for _, d := range missing {
 		id, err := createPlan(token, productID, d.name, d.priceUSD)
 		if err != nil {
-			log.Printf("billing: failed to create plan %s: %v", d.plan, err)
+			slog.Error("billing: failed to create plan", "plan", d.plan, "error", err)
 			continue
 		}
 		// Save to DB so it survives restarts.
 		savePlanID(d.plan, id)
 		planIDCache[d.plan] = id
-		log.Printf("billing: plan %s created → %s (saved to DB)", d.plan, id)
+		slog.Info("billing: plan created and saved to DB", "plan", d.plan, "plan_id", id)
 	}
 }
 
@@ -231,13 +233,13 @@ func getOrCreateProduct(token string) string {
 		"category":    "SOFTWARE",
 	}, &product)
 	if err != nil || product.ID == "" {
-		log.Printf("billing: PayPal product creation failed (status %d): %s %v", status, raw, err)
+		slog.Error("billing: PayPal product creation failed", "status", status, "response", string(raw), "error", err)
 		return ""
 	}
 
 	// Persist product ID.
 	database.DB.Save(&models.PlatformSetting{Key: "paypal_product_id", Value: product.ID, UpdatedAt: time.Now()})
-	log.Printf("billing: PayPal product created → %s", product.ID)
+	slog.Info("billing: PayPal product created", "product_id", product.ID)
 	return product.ID
 }
 
@@ -284,7 +286,7 @@ func createPlan(token, productID, name string, priceUSD float64) (string, error)
 	// Explicitly activate to be safe.
 	activateStatus, _, _ := ppPost(token, "/v1/billing/plans/"+result.ID+"/activate", map[string]string{}, nil)
 	if activateStatus != http.StatusNoContent && activateStatus != http.StatusOK {
-		log.Printf("billing: plan %s activate returned status %d (may already be active)", result.ID, activateStatus)
+		slog.Warn("billing: plan activate returned non-success status (may already be active)", "plan_id", result.ID, "status", activateStatus)
 	}
 
 	return result.ID, nil

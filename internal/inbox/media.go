@@ -2,8 +2,8 @@ package inbox
 
 import (
 	"context"
-	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"time"
 	"whatify/backend/internal/billing"
@@ -52,6 +52,15 @@ func handleGetMedia(c *gin.Context) {
 	}
 
 	client := session.Mgr.GetClient(conv.SessionID.String())
+	// Fallback: session may have been recreated — look up by phone instead.
+	if client == nil && conv.SessionPhone != "" {
+		var waSession models.WhatsAppSession
+		if err := database.DB.
+			Where("tenant_id = ? AND phone = ? AND status = ?", tenantID, conv.SessionPhone, models.StatusConnected).
+			First(&waSession).Error; err == nil {
+			client = session.Mgr.GetClient(waSession.ID.String())
+		}
+	}
 	if client == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "whatsapp session not connected"})
 		return
@@ -108,7 +117,12 @@ func handleGetMedia(c *gin.Context) {
 
 	data, err := client.Download(context.Background(), downloadable)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to download media: %v", err)})
+		// Media downloads commonly fail for historical messages whose media has
+		// expired on WhatsApp's servers, or whose keys are no longer valid. This
+		// is not a server fault — return 404 so the client degrades gracefully
+		// (broken-image fallback) instead of flooding logs with 500s.
+		log.Printf("media %s: download failed (likely expired): %v", msgID, err)
+		c.JSON(http.StatusNotFound, gin.H{"error": "media no longer available"})
 		return
 	}
 
@@ -148,6 +162,11 @@ func handleSendMedia(c *gin.Context) {
 	if ct := header.Header.Get("Content-Type"); ct != "" && ct != "application/octet-stream" {
 		mimeType = ct
 	}
+	// Go's DetectContentType returns "application/ogg" for OGG files;
+	// normalise so the audio routing in SendMedia picks it up.
+	if mimeType == "application/ogg" {
+		mimeType = "audio/ogg; codecs=opus"
+	}
 
 	conv, err := getConversationByID(tenantID, convID)
 	if err != nil {
@@ -172,7 +191,8 @@ func handleSendMedia(c *gin.Context) {
 		}
 	}
 
-	waID, msgType, err := session.Mgr.SendMedia(sessionIDStr, conv.Contact.PhoneNumber, data, mimeType, header.Filename)
+	caption := c.Request.FormValue("caption")
+	waID, msgType, mediaPayload, err := session.Mgr.SendMedia(sessionIDStr, conv.Contact.PhoneNumber, data, mimeType, header.Filename, caption)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "whatsapp send failed: " + err.Error()})
 		return
@@ -188,9 +208,16 @@ func handleSendMedia(c *gin.Context) {
 		Direction:      models.DirectionOutgoing,
 		Status:         models.MessageStatusSent,
 		WaMessageID:    waID,
+		MediaPayload:   mediaPayload,
 		Timestamp:      now,
 	}
-	database.DB.Create(&msg)
+	if msgType == models.MessageTypeAudio {
+		msg.Content = "Voice Message"
+	}
+	if err := database.DB.Create(&msg).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save message"})
+		return
+	}
 	database.DB.Exec("UPDATE conversations SET updated_at = NOW(), last_message_at = ? WHERE id = ?", now, convID)
 
 	if conv.SessionPhone != "" {

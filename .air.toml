@@ -1,0 +1,23 @@
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  cmd = "go build -o ./tmp/whatify ./cmd/server"
+  bin = "./tmp/whatify"
+  delay = 500
+  exclude_dir = ["tmp", "vendor"]
+  include_ext = ["go"]
+  kill_delay = "2s"
+  rerun_delay = 500
+
+[log]
+  time = true
+
+[color]
+  build = "yellow"
+  runner = "green"
+  watcher = "cyan"
+  app = ""
+
+[misc]
+  clean_on_exit = true

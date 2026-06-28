@@ -1,6 +1,7 @@
 package tags
 
 import (
+	"fmt"
 	"net/http"
 	"whatify/backend/internal/activity"
 	"whatify/backend/internal/middleware"
@@ -106,4 +107,74 @@ func deleteTag(c *gin.Context) {
 		"name": tag.Name,
 	})
 	c.JSON(http.StatusOK, gin.H{"message": "Tag deleted"})
+}
+
+type BulkContactInput struct {
+	ContactIDs []uuid.UUID `json:"contact_ids" binding:"required"`
+}
+
+func addContactsToTag(c *gin.Context) {
+	tenantID := c.MustGet(middleware.CtxTenantID).(uuid.UUID)
+	tagID := c.Param("id")
+
+	var tag models.Tag
+	if err := database.DB.Where("id = ? AND tenant_id = ?", tagID, tenantID).First(&tag).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Tag not found"})
+		return
+	}
+
+	var input BulkContactInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	var contacts []models.Contact
+	database.DB.Where("id IN ? AND tenant_id = ?", input.ContactIDs, tenantID).Find(&contacts)
+	if len(contacts) == 0 {
+		c.JSON(http.StatusOK, gin.H{"message": "No contacts found", "added": 0})
+		return
+	}
+
+	database.DB.Model(&tag).Association("Contacts").Append(contacts)
+
+	userID := c.MustGet(middleware.CtxUserID).(uuid.UUID)
+	activity.Log(tenantID, &userID, "tag.contacts_added", "tag", tag.ID.String(), map[string]string{
+		"tag":         tag.Name,
+		"contact_ids": fmt.Sprintf("%d", len(contacts)),
+	})
+	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("Added %d contacts to tag", len(contacts)), "added": len(contacts)})
+}
+
+func removeContactsFromTag(c *gin.Context) {
+	tenantID := c.MustGet(middleware.CtxTenantID).(uuid.UUID)
+	tagID := c.Param("id")
+
+	var tag models.Tag
+	if err := database.DB.Where("id = ? AND tenant_id = ?", tagID, tenantID).First(&tag).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Tag not found"})
+		return
+	}
+
+	var input BulkContactInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	var contacts []models.Contact
+	database.DB.Where("id IN ? AND tenant_id = ?", input.ContactIDs, tenantID).Find(&contacts)
+	if len(contacts) == 0 {
+		c.JSON(http.StatusOK, gin.H{"message": "No contacts found", "removed": 0})
+		return
+	}
+
+	database.DB.Model(&tag).Association("Contacts").Delete(contacts)
+
+	userID := c.MustGet(middleware.CtxUserID).(uuid.UUID)
+	activity.Log(tenantID, &userID, "tag.contacts_removed", "tag", tag.ID.String(), map[string]string{
+		"tag":         tag.Name,
+		"contact_ids": fmt.Sprintf("%d", len(contacts)),
+	})
+	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("Removed %d contacts from tag", len(contacts)), "removed": len(contacts)})
 }

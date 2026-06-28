@@ -18,7 +18,51 @@ type WebhookInput struct {
 	IsActive *bool    `json:"is_active"`
 }
 
-func generateSecret() string {
+type WebhookResponse struct {
+	ID        uuid.UUID `json:"id"`
+	URL       string    `json:"url"`
+	Events    string    `json:"events"`
+	Secret    string    `json:"secret"`
+	IsActive  bool      `json:"is_active"`
+	CreatedAt string    `json:"created_at"`
+}
+
+type WebhookListItem struct {
+	ID        uuid.UUID `json:"id"`
+	URL       string    `json:"url"`
+	Events    string    `json:"events"`
+	Secret    string    `json:"secret"`
+	IsActive  bool      `json:"is_active"`
+	CreatedAt string    `json:"created_at"`
+}
+
+func toWebhookResponse(h models.Webhook) WebhookResponse {
+	return WebhookResponse{
+		ID:        h.ID,
+		URL:       h.URL,
+		Events:    h.Events,
+		Secret:    h.Secret,
+		IsActive:  h.IsActive,
+		CreatedAt: h.CreatedAt.Format("2006-01-02T15:04:05Z"),
+	}
+}
+
+func toWebhookListItem(h models.Webhook) WebhookListItem {
+	secret := h.Secret
+	if len(secret) > 14 {
+		secret = secret[:14] + "••••"
+	}
+	return WebhookListItem{
+		ID:        h.ID,
+		URL:       h.URL,
+		Events:    h.Events,
+		Secret:    secret,
+		IsActive:  h.IsActive,
+		CreatedAt: h.CreatedAt.Format("2006-01-02T15:04:05Z"),
+	}
+}
+
+func GenerateSecret() string {
 	b := make([]byte, 20)
 	rand.Read(b)
 	return "whsec_" + hex.EncodeToString(b)
@@ -39,7 +83,12 @@ func listWebhooks(c *gin.Context) {
 	tenantID := c.MustGet(middleware.CtxTenantID).(uuid.UUID)
 	var hooks []models.Webhook
 	database.DB.Where("tenant_id = ?", tenantID).Order("created_at DESC").Find(&hooks)
-	c.JSON(http.StatusOK, hooks)
+
+	out := make([]WebhookListItem, len(hooks))
+	for i, h := range hooks {
+		out[i] = toWebhookListItem(h)
+	}
+	c.JSON(http.StatusOK, out)
 }
 
 func createWebhook(c *gin.Context) {
@@ -55,7 +104,7 @@ func createWebhook(c *gin.Context) {
 		TenantID: tenantID,
 		URL:      input.URL,
 		Events:   eventsToJSON(input.Events),
-		Secret:   generateSecret(),
+		Secret:   GenerateSecret(),
 		IsActive: true,
 	}
 	if input.IsActive != nil {
@@ -66,7 +115,7 @@ func createWebhook(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create webhook"})
 		return
 	}
-	c.JSON(http.StatusCreated, hook)
+	c.JSON(http.StatusCreated, toWebhookResponse(hook))
 }
 
 func updateWebhook(c *gin.Context) {
@@ -92,7 +141,7 @@ func updateWebhook(c *gin.Context) {
 	}
 
 	database.DB.Save(&hook)
-	c.JSON(http.StatusOK, hook)
+	c.JSON(http.StatusOK, toWebhookListItem(hook))
 }
 
 func deleteWebhook(c *gin.Context) {

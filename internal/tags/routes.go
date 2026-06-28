@@ -14,5 +14,7 @@ func RegisterRoutes(r *gin.RouterGroup) {
 		group.POST("", createTag)
 		group.PUT("/:id", updateTag)
 		group.DELETE("/:id", deleteTag)
+		group.POST("/:id/contacts", addContactsToTag)
+		group.DELETE("/:id/contacts", removeContactsFromTag)
 	}
 }

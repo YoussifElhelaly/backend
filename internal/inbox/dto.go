@@ -24,6 +24,9 @@ type ConversationResponse struct {
 	SessionPhone  string           `json:"session_phone"`
 	Contact       ContactResponse  `json:"contact"`
 	Status        string           `json:"status"`
+	ChatType      string           `json:"chat_type"`
+	GroupName     string           `json:"group_name,omitempty"`
+	GroupJID      string           `json:"group_jid,omitempty"`
 	AssignedTo    *string          `json:"assigned_to"`
 	UnreadCount   int              `json:"unread_count"`
 	LastMessage   *MessageResponse `json:"last_message,omitempty"`

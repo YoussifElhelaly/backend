@@ -1,6 +1,7 @@
 package inbox
 
 import (
+	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -49,19 +50,43 @@ func schedulePostSyncBroadcast(tenantID uuid.UUID, sessionPhone string) {
 // conversations and messages into the DB. Called automatically when a session connects.
 // sessionPhone is the business WhatsApp number (our side) for this session.
 func HandleHistorySync(sessionID, tenantID uuid.UUID, sessionPhone string, convs []*waHistorySync.Conversation) {
-	log.Printf("history sync: session=%s tenant=%s phone=%s conversations=%d", sessionID, tenantID, sessionPhone, len(convs))
+	total := len(convs)
+	log.Printf("history sync: session=%s phone=%s total=%d", sessionID, sessionPhone, total)
+	var countIndividual, countGroup, countBroadcast, countSkipped int
+	defer func() {
+		log.Printf("history sync done: individual=%d groups=%d broadcasts=%d skipped=%d", countIndividual, countGroup, countBroadcast, countSkipped)
+	}()
 
 	for _, wac := range convs {
 		jid := wac.GetID()
 		var phone string
+		var chatType models.ChatType
+		var groupName, groupJID string
 		isLID := false
-		if strings.HasSuffix(jid, "@s.whatsapp.net") {
+
+		switch {
+		case strings.HasSuffix(jid, "@s.whatsapp.net"):
 			phone = strings.TrimSuffix(jid, "@s.whatsapp.net")
-		} else if strings.HasSuffix(jid, "@lid") {
+			chatType = models.ChatTypeIndividual
+		case strings.HasSuffix(jid, "@lid"):
 			isLID = true
 			phone = strings.TrimSuffix(jid, "@lid")
-		} else {
-			continue // skip groups, broadcast lists, status/stories
+			chatType = models.ChatTypeIndividual
+		case strings.HasSuffix(jid, "@g.us"):
+			phone = strings.TrimSuffix(jid, "@g.us")
+			chatType = models.ChatTypeGroup
+			groupJID = jid
+			groupName = wac.GetName()
+			log.Printf("history sync: group jid=%s name=%q msgs=%d", jid, groupName, len(wac.GetMessages()))
+		case strings.HasSuffix(jid, "@broadcast") && !strings.HasPrefix(jid, "status@"):
+			phone = strings.TrimSuffix(jid, "@broadcast")
+			chatType = models.ChatTypeBroadcast
+			groupJID = jid
+			groupName = wac.GetName()
+			log.Printf("history sync: broadcast jid=%s name=%q msgs=%d", jid, groupName, len(wac.GetMessages()))
+		default:
+			countSkipped++
+			continue // skip status@broadcast, newsletters, stories, etc.
 		}
 
 		// For LID contacts, try to resolve to real phone number immediately.
@@ -84,14 +109,30 @@ func HandleHistorySync(sessionID, tenantID uuid.UUID, sessionPhone string, convs
 			continue
 		}
 
-		contact := findOrCreateContact(tenantID, sessionID, phone, wac.GetName())
+		// For groups/broadcasts use the JID user-part as the contact phone number.
+		// This keeps contacts unique per group/broadcast list.
+		contactName := wac.GetName()
+		if chatType == models.ChatTypeIndividual {
+			contactName = wac.GetName()
+		}
+
+		contact := findOrCreateContact(tenantID, sessionID, phone, contactName)
 		if contact == nil {
 			continue
 		}
 
-		conv := findOrCreateConversation(tenantID, sessionID, contact.ID, sessionPhone)
+		conv := findOrCreateConversation(tenantID, sessionID, contact.ID, sessionPhone, chatType, groupName, groupJID)
 		if conv == nil {
+			countSkipped++
 			continue
+		}
+		switch chatType {
+		case models.ChatTypeGroup:
+			countGroup++
+		case models.ChatTypeBroadcast:
+			countBroadcast++
+		default:
+			countIndividual++
 		}
 
 		// Seed last_message_at from WhatsApp's own conversation timestamp.
@@ -168,9 +209,15 @@ func HandleHistorySync(sessionID, tenantID uuid.UUID, sessionPhone string, convs
 				content = waMsg.GetReactionMessage().GetText()
 				reactionToID = waMsg.GetReactionMessage().GetKey().GetID()
 			case waMsg.GetLocationMessage() != nil:
+				loc := waMsg.GetLocationMessage()
+				content = fmt.Sprintf(`{"lat":%f,"lng":%f,"name":"%s","address":"%s"}`,
+					loc.GetDegreesLatitude(), loc.GetDegreesLongitude(),
+					loc.GetName(), loc.GetAddress())
 				msgType = models.MessageTypeLocation
 			case waMsg.GetContactMessage() != nil:
-				content = waMsg.GetContactMessage().GetDisplayName()
+				cm := waMsg.GetContactMessage()
+				content = fmt.Sprintf(`{"name":"%s","vcard":"%s"}`,
+					cm.GetDisplayName(), escapeJSON(cm.GetVcard()))
 				msgType = models.MessageTypeContact
 			default:
 				msgType = models.MessageTypeText
@@ -230,70 +277,120 @@ func HandleHistorySync(sessionID, tenantID uuid.UUID, sessionPhone string, convs
 	schedulePostSyncBroadcast(tenantID, sessionPhone)
 }
 
-// TriggerSync streams conversations and messages to the frontend via WebSockets
+// BootstrapFromWAStore populates conversations from whatsmeow's local device store.
+// Used when the app DB is empty (e.g. after Reset) but the WA device is still registered.
+// WhatsApp won't resend HistorySync for already-registered devices, so we read
+// whatsmeow_chat_settings + whatsmeow_contacts directly to rebuild conversation stubs.
+func BootstrapFromWAStore(sessionID, tenantID uuid.UUID, sessionPhone string) {
+	ourJID := sessionPhone + "@s.whatsapp.net"
+	log.Printf("bootstrap: reading whatsmeow store for %s", ourJID)
+
+	type chatRow struct {
+		ChatJID  string `gorm:"column:chat_jid"`
+		Archived bool   `gorm:"column:archived"`
+	}
+	var chats []chatRow
+	if err := database.DB.Raw(
+		`SELECT chat_jid, archived FROM whatsmeow_chat_settings WHERE our_jid = ? AND archived = false`,
+		ourJID,
+	).Scan(&chats).Error; err != nil {
+		log.Printf("bootstrap: read chat_settings failed: %v", err)
+		return
+	}
+	log.Printf("bootstrap: %d non-archived chats in whatsmeow store", len(chats))
+
+	type contactRow struct {
+		FullName  string `gorm:"column:full_name"`
+		PushName  string `gorm:"column:push_name"`
+		FirstName string `gorm:"column:first_name"`
+	}
+
+	count := 0
+	for _, chat := range chats {
+		if !strings.HasSuffix(chat.ChatJID, "@s.whatsapp.net") {
+			continue // skip groups, broadcasts, etc.
+		}
+		phone := strings.TrimSuffix(chat.ChatJID, "@s.whatsapp.net")
+		if phone == "" || phone == sessionPhone {
+			continue // skip self
+		}
+
+		var cr contactRow
+		database.DB.Raw(
+			`SELECT full_name, push_name, first_name FROM whatsmeow_contacts WHERE our_jid = ? AND their_jid = ?`,
+			ourJID, chat.ChatJID,
+		).Scan(&cr)
+
+		name := cr.FullName
+		if name == "" {
+			name = cr.PushName
+		}
+		if name == "" {
+			name = cr.FirstName
+		}
+
+		contact := findOrCreateContact(tenantID, sessionID, phone, name)
+		if contact == nil {
+			continue
+		}
+		findOrCreateConversation(tenantID, sessionID, contact.ID, sessionPhone, models.ChatTypeIndividual, "", "")
+		count++
+	}
+	log.Printf("bootstrap: created/found %d conversations from WA store", count)
+}
+
+// TriggerSync broadcasts all conversations + messages to every connected client.
+// Called after HistorySync (new QR connect) or manual resync.
+// Delta sync handles the "client was offline briefly" case separately.
 func TriggerSync(tenantID uuid.UUID, sessionPhone string) {
-	log.Printf("Triggering manual sync for tenant %s, sessionPhone: %s", tenantID, sessionPhone)
+	log.Printf("TriggerSync: full broadcast for tenant=%s sessionPhone=%s", tenantID, sessionPhone)
 
-	GlobalHub.Broadcast(tenantID.String(), WSEvent{
-		Event: "sync_start",
-		Data:  nil,
-	})
+	GlobalHub.Broadcast(tenantID.String(), WSEvent{Event: "sync_start", Data: nil})
 
-	// Fetch conversations filtered by sessionPhone
-	convs, err := getConversations(tenantID, 1, 1000, sessionPhone)
+	convs, err := getConversations(tenantID, 1, 1000, sessionPhone, "")
 	if err != nil {
 		log.Printf("sync error fetching convs: %v", err)
 		return
 	}
+	GlobalHub.Broadcast(tenantID.String(), WSEvent{Event: "sync_chunk_convs", Data: convs})
 
-	GlobalHub.Broadcast(tenantID.String(), WSEvent{
-		Event: "sync_chunk_convs",
-		Data:  convs,
-	})
-
-	// Fetch all messages chunked (max 500 per chunk)
 	limit := 500
 	page := 1
-
 	for {
 		offset := (page - 1) * limit
 		var msgs []models.Message
-		query := database.DB.Where("messages.tenant_id = ?", tenantID)
+		q := database.DB.Where("messages.tenant_id = ?", tenantID)
 		if sessionPhone != "" {
-			query = query.Joins("JOIN conversations ON conversations.id = messages.conversation_id").
+			q = q.Joins("JOIN conversations ON conversations.id = messages.conversation_id").
 				Where("conversations.session_phone = ?", sessionPhone).
 				Select("messages.*")
 		}
-
-		if err := query.Order("messages.timestamp asc").
-			Limit(limit).Offset(offset).
-			Find(&msgs).Error; err != nil {
-			log.Printf("sync error fetching msgs: %v", err)
+		if err := q.Order("messages.timestamp asc").Limit(limit).Offset(offset).Find(&msgs).Error; err != nil {
 			break
 		}
-
 		if len(msgs) == 0 {
 			break
 		}
-
 		out := make([]MessageResponse, len(msgs))
 		for i, m := range msgs {
 			out[i] = toMsgResponse(m)
 		}
-
-		GlobalHub.Broadcast(tenantID.String(), WSEvent{
-			Event: "sync_chunk_msgs",
-			Data:  out,
-		})
-
+		GlobalHub.Broadcast(tenantID.String(), WSEvent{Event: "sync_chunk_msgs", Data: out})
 		if len(msgs) < limit {
 			break
 		}
 		page++
 	}
 
-	GlobalHub.Broadcast(tenantID.String(), WSEvent{
-		Event: "sync_complete",
-		Data:  nil,
-	})
+	GlobalHub.Broadcast(tenantID.String(), WSEvent{Event: "sync_complete", Data: nil})
+}
+
+// escapeJSON escapes special characters for safe embedding in JSON string values.
+func escapeJSON(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	s = strings.ReplaceAll(s, "\n", `\n`)
+	s = strings.ReplaceAll(s, "\r", `\r`)
+	s = strings.ReplaceAll(s, "\t", `\t`)
+	return s
 }

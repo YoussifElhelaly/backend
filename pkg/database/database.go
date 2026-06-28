@@ -19,7 +19,7 @@ func Connect() {
 	dsn := fmt.Sprintf(
 		"host=%s user=%s dbname=%s port=%s sslmode=%s TimeZone=UTC",
 		getEnv("DB_HOST", "localhost"),
-		getEnv("DB_USER", "helaly"),
+		getEnv("DB_USER", "whatify"),
 		getEnv("DB_NAME", "whatify"),
 		getEnv("DB_PORT", "5432"),
 		getEnv("DB_SSLMODE", "disable"),
@@ -59,6 +59,7 @@ func Connect() {
 			&models.FunnelContact{},
 			&models.FunnelContactHistory{},
 			&models.Flow{},
+			&models.FlowRun{},
 			&models.ActivityLog{},
 			&models.Product{},
 			&models.QuickReply{},
@@ -66,9 +67,11 @@ func Connect() {
 			&models.Webhook{},
 			&models.Subscription{},
 			&models.PlatformSetting{},
+			&models.PlanDef{},
 			&models.PasswordResetToken{},
 			&models.EmailVerificationToken{},
 			&models.RefreshToken{},
+			&models.AIConfig{},
 		); err != nil {
 			log.Fatalf("failed to run migrations: %v", err)
 		}
@@ -78,6 +81,9 @@ func Connect() {
 		// that soft-deleted users don't block re-registration with the same email.
 		db.Exec(`DROP INDEX IF EXISTS idx_users_email`)
 		db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_active ON users (email) WHERE deleted_at IS NULL`)
+
+		// Unique contact per tenant (excluding soft-deleted).
+		db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_tenant_phone ON contacts (tenant_id, phone_number) WHERE deleted_at IS NULL`)
 	} else {
 		log.Println("database: auto-migrate skipped (DISABLE_AUTO_MIGRATE=true)")
 	}
@@ -87,8 +93,8 @@ func Connect() {
 	if err != nil {
 		log.Fatalf("failed to get underlying sql.DB: %v", err)
 	}
-	sqlDB.SetMaxOpenConns(25)
-	sqlDB.SetMaxIdleConns(10)
+	sqlDB.SetMaxOpenConns(100)
+	sqlDB.SetMaxIdleConns(25)
 	sqlDB.SetConnMaxLifetime(5 * time.Minute)
 	sqlDB.SetConnMaxIdleTime(2 * time.Minute)
 

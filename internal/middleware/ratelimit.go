@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -36,7 +37,17 @@ func RateLimit(maxReqs int, window time.Duration) gin.HandlerFunc {
 	}()
 
 	return func(c *gin.Context) {
-		ip := c.ClientIP()
+		// Use X-Real-IP when behind a reverse proxy to prevent IP spoofing.
+		ip := c.GetHeader("X-Real-IP")
+		if ip == "" {
+			ip = c.GetHeader("X-Forwarded-For")
+			if idx := strings.Index(ip, ","); idx != -1 {
+				ip = strings.TrimSpace(ip[:idx])
+			}
+		}
+		if ip == "" {
+			ip = c.ClientIP()
+		}
 		val, _ := store.LoadOrStore(ip, &rlBucket{resetAt: time.Now().Add(window)})
 		b := val.(*rlBucket)
 

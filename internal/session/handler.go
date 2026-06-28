@@ -19,6 +19,7 @@ func RegisterRoutes(r *gin.RouterGroup) {
 	{
 		s.GET("", handleList)
 		s.POST("", handleCreate)
+		s.PUT("/:id", handleUpdate)
 		s.DELETE("/:id", handleDelete)
 		s.GET("/:id/qr", handleQR)
 		s.POST("/:id/reconnect", handleReconnect)
@@ -45,7 +46,10 @@ func handleCreate(c *gin.Context) {
 	}
 
 	var req CreateSessionRequest
-	_ = c.ShouldBindJSON(&req)
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 
 	s, err := create(tenantID, req)
 	if err != nil {
@@ -61,6 +65,26 @@ func handleCreate(c *gin.Context) {
 	}()
 
 	c.JSON(http.StatusCreated, toDTO(*s))
+}
+
+func handleUpdate(c *gin.Context) {
+	tenantID := c.MustGet(middleware.CtxTenantID).(uuid.UUID)
+	id := c.Param("id")
+
+	var req struct {
+		ProxyURL *string `json:"proxy_url"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	sess, err := updateSession(tenantID, id, req.ProxyURL)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, toDTO(*sess))
 }
 
 func handleDelete(c *gin.Context) {
@@ -116,7 +140,6 @@ func handleQR(c *gin.Context) {
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("Connection", "keep-alive")
-	c.Header("Access-Control-Allow-Origin", "*")
 
 	ch := Mgr.SubscribeQR(id)
 	defer Mgr.UnsubscribeQR(id, ch)
@@ -136,6 +159,9 @@ func handleQR(c *gin.Context) {
 				fmt.Fprintf(w, "event: qr\ndata: %s\n\n", update.Code)
 			case "success":
 				fmt.Fprintf(w, "event: success\ndata: connected\n\n")
+				return false
+			case "duplicate":
+				fmt.Fprintf(w, "event: duplicate\ndata: duplicate\n\n")
 				return false
 			case "timeout":
 				fmt.Fprintf(w, "event: timeout\ndata: timeout\n\n")
