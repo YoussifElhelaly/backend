@@ -12,8 +12,9 @@ import (
 )
 
 type CampaignSettingsResponse struct {
-	CampaignDelayMin int `json:"campaign_delay_min"`
-	CampaignDelayMax int `json:"campaign_delay_max"`
+	CampaignDelayMin  int `json:"campaign_delay_min"`
+	CampaignDelayMax  int `json:"campaign_delay_max"`
+	DailyMessageLimit int `json:"daily_message_limit"`
 }
 
 type UpdateCampaignSettingsRequest struct {
@@ -25,15 +26,16 @@ func getCampaignSettings(c *gin.Context) {
 	tenantID := c.MustGet(middleware.CtxTenantID).(uuid.UUID)
 
 	var tenant models.Tenant
-	if err := database.DB.Select("campaign_delay_min, campaign_delay_max").
+	if err := database.DB.Select("campaign_delay_min, campaign_delay_max, daily_message_limit").
 		Where("id = ?", tenantID).First(&tenant).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
 	c.JSON(http.StatusOK, CampaignSettingsResponse{
-		CampaignDelayMin: tenant.CampaignDelayMin,
-		CampaignDelayMax: tenant.CampaignDelayMax,
+		CampaignDelayMin:  tenant.CampaignDelayMin,
+		CampaignDelayMax:  tenant.CampaignDelayMax,
+		DailyMessageLimit: tenant.DailyMessageLimit,
 	})
 }
 
@@ -93,12 +95,13 @@ func updateCampaignSettings(c *gin.Context) {
 	}
 
 	var tenant models.Tenant
-	database.DB.Select("campaign_delay_min, campaign_delay_max").
+	database.DB.Select("campaign_delay_min, campaign_delay_max, daily_message_limit").
 		Where("id = ?", tenantID).First(&tenant)
 
 	c.JSON(http.StatusOK, CampaignSettingsResponse{
-		CampaignDelayMin: tenant.CampaignDelayMin,
-		CampaignDelayMax: tenant.CampaignDelayMax,
+		CampaignDelayMin:  tenant.CampaignDelayMin,
+		CampaignDelayMax:  tenant.CampaignDelayMax,
+		DailyMessageLimit: tenant.DailyMessageLimit,
 	})
 }
 

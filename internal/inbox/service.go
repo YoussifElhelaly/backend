@@ -204,12 +204,15 @@ func findOrCreateConversation(tenantID, sessionID uuid.UUID, contactID uuid.UUID
 	return &conv
 }
 
-func getConversations(tenantID uuid.UUID, page, limit int, sessionPhone, chatType string) ([]ConversationResponse, error) {
+func getConversations(tenantID uuid.UUID, page, limit int, sessionPhone, chatType string, agentFilter *uuid.UUID) ([]ConversationResponse, error) {
 	offset := (page - 1) * limit
 	var convs []models.Conversation
 	q := database.DB.Preload("Contact").Where("tenant_id = ?", tenantID)
 	if sessionPhone != "" {
 		q = q.Where("session_phone = ?", sessionPhone)
+	}
+	if agentFilter != nil {
+		q = q.Where("assigned_to = ?", *agentFilter)
 	}
 	if chatType != "" {
 		q = q.Where("chat_type = ?", chatType)
@@ -288,6 +291,7 @@ func getMessages(tenantID, conversationID uuid.UUID, page, limit int) ([]Message
 	offset := (page - 1) * limit
 	var msgs []models.Message
 	if err := database.DB.
+		Preload("Sender").
 		Where("conversation_id = ?", conversationID).
 		Order("timestamp asc").
 		Limit(limit).Offset(offset).
@@ -324,6 +328,7 @@ func sendMessage(tenantID, conversationID uuid.UUID, content string, senderID uu
 	if err := database.DB.Create(&msg).Error; err != nil {
 		return nil, err
 	}
+	database.DB.Preload("Sender").First(&msg, msg.ID)
 
 	now := time.Now()
 	database.DB.Exec("UPDATE conversations SET updated_at = NOW(), last_message_at = ? WHERE id = ?", now, conv.ID)
@@ -345,7 +350,7 @@ func sendMessage(tenantID, conversationID uuid.UUID, content string, senderID uu
 
 func createNote(tenantID, conversationID uuid.UUID, content string, senderID uuid.UUID) (*MessageResponse, error) {
 	var conv models.Conversation
-	if err := database.DB.Where("id = ? AND tenant_id = ?", conversationID, tenantID).First(&conv).Error; err != nil {
+	if err := database.DB.Preload("Contact").Where("id = ? AND tenant_id = ?", conversationID, tenantID).First(&conv).Error; err != nil {
 		return nil, fmt.Errorf("conversation not found")
 	}
 
@@ -363,6 +368,7 @@ func createNote(tenantID, conversationID uuid.UUID, content string, senderID uui
 	if err := database.DB.Create(&msg).Error; err != nil {
 		return nil, err
 	}
+	database.DB.Preload("Sender").First(&msg, msg.ID)
 
 	now := time.Now()
 	database.DB.Exec("UPDATE conversations SET updated_at = NOW(), last_message_at = ? WHERE id = ?", now, conv.ID)
@@ -515,6 +521,9 @@ func toMsgResponse(m models.Message) MessageResponse {
 	if m.SenderID != nil {
 		s := m.SenderID.String()
 		r.SenderID = &s
+	}
+	if m.Sender != nil {
+		r.SenderName = &m.Sender.Name
 	}
 	return r
 }

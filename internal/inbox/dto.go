@@ -47,6 +47,7 @@ type MessageResponse struct {
 	ID             string  `json:"id"`
 	ConversationID string  `json:"conversation_id"`
 	SenderID       *string `json:"sender_id,omitempty"`
+	SenderName     *string `json:"sender_name,omitempty"`
 	Type           string  `json:"type"`
 	Content        string  `json:"content"`
 	MediaURL       string  `json:"media_url,omitempty"`

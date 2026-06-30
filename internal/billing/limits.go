@@ -25,10 +25,7 @@ var PlanDefs = map[models.Plan]PlanLimits{
 }
 
 func GetLimits(plan models.Plan) PlanLimits {
-	if l, ok := PlanDefs[plan]; ok {
-		return l
-	}
-	// Check for custom plan in database
+	// Always prefer DB (admin can edit prices/limits via dashboard)
 	var planDef models.PlanDef
 	if err := database.DB.Where("name = ? AND is_active = true", plan).First(&planDef).Error; err == nil {
 		return PlanLimits{
@@ -38,6 +35,10 @@ func GetLimits(plan models.Plan) PlanLimits {
 			PriceUSD:    planDef.PriceUSD,
 			Label:       planDef.Label,
 		}
+	}
+	// Fallback to hardcoded for safety
+	if l, ok := PlanDefs[plan]; ok {
+		return l
 	}
 	return PlanDefs[models.PlanStarter]
 }

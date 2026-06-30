@@ -38,6 +38,20 @@ func planDBKey(plan models.Plan) string {
 	return "paypal_plan_id_" + strings.ToLower(string(plan))
 }
 
+// planPriceKey returns the DB key for the price used when creating a PayPal plan.
+func planPriceKey(plan models.Plan) string {
+	return "paypal_plan_price_" + strings.ToLower(string(plan))
+}
+
+// savePlanPrice stores the price that was used to create a PayPal plan.
+func savePlanPrice(plan models.Plan, price float64) {
+	database.DB.Save(&models.PlatformSetting{
+		Key:       planPriceKey(plan),
+		Value:     fmt.Sprintf("%.2f", price),
+		UpdatedAt: time.Now(),
+	})
+}
+
 // getPayPalPlanID returns the PayPal plan ID for a given subscription plan.
 // Order of resolution: in-memory cache → env var → DB → create via PayPal API.
 func getPayPalPlanID(plan models.Plan) (string, error) {
@@ -46,22 +60,7 @@ func getPayPalPlanID(plan models.Plan) (string, error) {
 		return id, nil
 	}
 
-	// 2. Env var
-	envKeys := map[models.Plan]string{
-		models.PlanStarter: "PAYPAL_PLAN_STARTER",
-		models.PlanGrowth:  "PAYPAL_PLAN_GROWTH",
-		models.PlanScale:   "PAYPAL_PLAN_SCALE",
-	}
-	envKey, ok := envKeys[plan]
-	if !ok {
-		return "", fmt.Errorf("unknown plan: %s", plan)
-	}
-	if id := os.Getenv(envKey); id != "" {
-		planIDCache[plan] = id
-		return id, nil
-	}
-
-	// 3. DB
+	// 2. DB
 	var setting models.PlatformSetting
 	if err := database.DB.First(&setting, "key = ?", planDBKey(plan)).Error; err == nil && setting.Value != "" {
 		// Verify the plan is still ACTIVE on PayPal's side (guards against stale DB entries).
@@ -72,6 +71,13 @@ func getPayPalPlanID(plan models.Plan) (string, error) {
 		// Plan is not active — delete from DB so SetupPayPalPlans recreates it.
 		slog.Warn("billing: plan not ACTIVE on PayPal, will recreate", "plan", plan, "plan_id", setting.Value)
 		database.DB.Delete(&setting)
+	}
+
+	// 3. Env var (fallback)
+	envKey := "PAYPAL_PLAN_" + strings.ToUpper(string(plan))
+	if id := os.Getenv(envKey); id != "" {
+		planIDCache[plan] = id
+		return id, nil
 	}
 
 	// 4. Not found anywhere
@@ -159,24 +165,84 @@ func SetupPayPalPlans() {
 	slog.Info("billing: PayPal configured", "sandbox", os.Getenv("PAYPAL_SANDBOX"), "client_id", paypalClientID())
 
 	type planDef struct {
-		plan     models.Plan
-		envKey   string
-		name     string
-		priceUSD float64
+		plan          models.Plan
+		envKey        string
+		name          string
+		priceUSD      float64
+		intervalCount int
+		period        string
 	}
-	defs := []planDef{
-		{models.PlanStarter, "PAYPAL_PLAN_STARTER", "Whatify Starter", 19},
-		{models.PlanGrowth, "PAYPAL_PLAN_GROWTH", "Whatify Growth", 49},
-		{models.PlanScale, "PAYPAL_PLAN_SCALE", "Whatify Scale", 99},
+	var allPlans []models.PlanDef
+	if err := database.DB.Where("is_active = true").Find(&allPlans).Error; err != nil {
+		slog.Error("billing: failed to load plans from db", "error", err)
+		return
 	}
 
-	// Check which plans are already resolved.
+	defs := make([]planDef, 0, len(allPlans))
+	for _, p := range allPlans {
+		defs = append(defs, planDef{
+			plan:          models.Plan(p.Name),
+			envKey:        "PAYPAL_PLAN_" + strings.ToUpper(p.Name),
+			name:          "Whatify " + p.Label,
+			priceUSD:      p.PriceUSD,
+			intervalCount: p.IntervalCount,
+			period:        p.Period,
+		})
+	}
+
+	// Check which plans are already resolved, and detect price changes.
 	missing := make([]planDef, 0)
 	for _, d := range defs {
+		// Check if price or interval changed since last PayPal plan creation.
+		var priceSetting models.PlatformSetting
+		priceEntryExists := database.DB.First(&priceSetting, "key = ?", planPriceKey(d.plan)).Error == nil
+		
+		var intervalSetting models.PlatformSetting
+		intervalEntryExists := database.DB.First(&intervalSetting, "key = ?", "paypal_plan_interval_"+string(d.plan)).Error == nil
+
+		if priceEntryExists {
+			var storedPrice float64
+			fmt.Sscanf(priceSetting.Value, "%f", &storedPrice)
+			
+			var storedInterval int
+			if intervalEntryExists {
+				fmt.Sscanf(intervalSetting.Value, "%d", &storedInterval)
+			}
+			if storedInterval == 0 {
+				storedInterval = 1 // default for old plans
+			}
+
+			if (storedPrice > 0 && storedPrice != d.priceUSD) || storedInterval != d.intervalCount {
+				slog.Warn("billing: price or interval changed, will recreate PayPal plan",
+					"plan", d.plan, "old_price", storedPrice, "new_price", d.priceUSD, "old_interval", storedInterval, "new_interval", d.intervalCount)
+				database.DB.Where("key = ?", planDBKey(d.plan)).Delete(&models.PlatformSetting{})
+				database.DB.Where("key = ?", planPriceKey(d.plan)).Delete(&models.PlatformSetting{})
+				database.DB.Where("key = ?", "paypal_plan_interval_"+string(d.plan)).Delete(&models.PlatformSetting{})
+				delete(planIDCache, d.plan)
+				missing = append(missing, d)
+				continue
+			}
+		}
+
 		id, err := getPayPalPlanID(d.plan)
 		if err != nil || id == "" {
 			missing = append(missing, d)
 		} else {
+			// No price entry yet (first run after deploy) — check PayPal API price.
+			if !priceEntryExists {
+				ppPrice := getPayPalPlanPrice(id)
+				if ppPrice > 0 && ppPrice != d.priceUSD {
+					slog.Warn("billing: PayPal plan price mismatch, will recreate",
+						"plan", d.plan, "paypal_price", ppPrice, "expected_price", d.priceUSD)
+					database.DB.Where("key = ?", planDBKey(d.plan)).Delete(&models.PlatformSetting{})
+					delete(planIDCache, d.plan)
+					missing = append(missing, d)
+					continue
+				}
+				// Price matches (or can't check) — save settings for future comparisons.
+				savePlanPrice(d.plan, d.priceUSD)
+				database.DB.Save(&models.PlatformSetting{Key: "paypal_plan_interval_" + string(d.plan), Value: fmt.Sprintf("%d", d.intervalCount), UpdatedAt: time.Now()})
+			}
 			slog.Info("billing: plan resolved", "plan", d.plan, "plan_id", id)
 		}
 	}
@@ -203,15 +269,17 @@ func SetupPayPalPlans() {
 	}
 
 	for _, d := range missing {
-		id, err := createPlan(token, productID, d.name, d.priceUSD)
+		id, err := createPlan(token, productID, d.name, d.priceUSD, d.intervalCount, d.period)
 		if err != nil {
 			slog.Error("billing: failed to create plan", "plan", d.plan, "error", err)
 			continue
 		}
 		// Save to DB so it survives restarts.
 		savePlanID(d.plan, id)
+		savePlanPrice(d.plan, d.priceUSD)
+		database.DB.Save(&models.PlatformSetting{Key: "paypal_plan_interval_" + string(d.plan), Value: fmt.Sprintf("%d", d.intervalCount), UpdatedAt: time.Now()})
 		planIDCache[d.plan] = id
-		slog.Info("billing: plan created and saved to DB", "plan", d.plan, "plan_id", id)
+		slog.Info("billing: plan created and saved to DB", "plan", d.plan, "plan_id", id, "price", d.priceUSD)
 	}
 }
 
@@ -243,7 +311,7 @@ func getOrCreateProduct(token string) string {
 	return product.ID
 }
 
-func createPlan(token, productID, name string, priceUSD float64) (string, error) {
+func createPlan(token, productID, name string, priceUSD float64, intervalCount int, period string) (string, error) {
 	type cycle struct {
 		Frequency     map[string]interface{} `json:"frequency"`
 		TenureType    string                 `json:"tenure_type"`
@@ -252,16 +320,24 @@ func createPlan(token, productID, name string, priceUSD float64) (string, error)
 		PricingScheme map[string]interface{} `json:"pricing_scheme"`
 	}
 
+	intervalUnit := "MONTH"
+	if period == "yr" || period == "year" {
+		intervalUnit = "YEAR"
+	}
+	if intervalCount < 1 {
+		intervalCount = 1
+	}
+
 	var result struct {
 		ID string `json:"id"`
 	}
 	s, r, e := ppPost(token, "/v1/billing/plans", map[string]interface{}{
 		"product_id":  productID,
 		"name":        name,
-		"description": name + " — monthly",
+		"description": fmt.Sprintf("%s — %d %s", name, intervalCount, intervalUnit),
 		"status":      "ACTIVE",
 		"billing_cycles": []cycle{{
-			Frequency:   map[string]interface{}{"interval_unit": "MONTH", "interval_count": 1},
+			Frequency:   map[string]interface{}{"interval_unit": intervalUnit, "interval_count": intervalCount},
 			TenureType:  "REGULAR",
 			Sequence:    1,
 			TotalCycles: 0,
@@ -305,6 +381,33 @@ func verifyPlanActive(planID string) bool {
 		return false
 	}
 	return result.Status == "ACTIVE"
+}
+
+// getPayPalPlanPrice fetches the price of an existing PayPal plan.
+func getPayPalPlanPrice(planID string) float64 {
+	token, err := getAccessToken()
+	if err != nil {
+		return 0
+	}
+	var result struct {
+		BillingCycles []struct {
+			PricingScheme struct {
+				FixedPrice struct {
+					Value string `json:"value"`
+				} `json:"fixed_price"`
+			} `json:"pricing_scheme"`
+		} `json:"billing_cycles"`
+	}
+	statusCode, _, _ := ppGet(token, "/v1/billing/plans/"+planID, &result)
+	if statusCode != http.StatusOK {
+		return 0
+	}
+	if len(result.BillingCycles) > 0 {
+		var price float64
+		fmt.Sscanf(result.BillingCycles[0].PricingScheme.FixedPrice.Value, "%f", &price)
+		return price
+	}
+	return 0
 }
 
 func savePlanID(plan models.Plan, id string) {

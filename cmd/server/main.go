@@ -27,6 +27,7 @@ import (
 	"whatify/backend/internal/session"
 	"whatify/backend/internal/tags"
 	"whatify/backend/internal/ai"
+	"whatify/backend/internal/public"
 	"whatify/backend/internal/middleware"
 	"whatify/backend/pkg/database"
 	"whatify/backend/pkg/jwtutil"
@@ -89,6 +90,9 @@ func main() {
 
 	// Wire session disconnect into admin package
 	admin.DisconnectSession = session.Mgr.Disconnect
+
+	// Seed default plan definitions (idempotent)
+	public.SeedDefaultPlans()
 
 	// Auto-create super admin from env if not exists
 	if saEmail := os.Getenv("SUPER_ADMIN_EMAIL"); saEmail != "" {
@@ -237,6 +241,7 @@ func main() {
 	ai.RegisterRoutes(v1)
 	developer.RegisterRoutes(v1)
 	billing.RegisterRoutes(v1)
+	public.RegisterRoutes(v1)
 	billing.SetupPayPalPlans()
 	billing.SeedBuiltinPlans()
 	billing.FixTrialDates()

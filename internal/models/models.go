@@ -173,6 +173,7 @@ type Message struct {
 	ConversationID uuid.UUID        `gorm:"type:uuid;not null;index"                       json:"conversation_id"`
 	TenantID       uuid.UUID        `gorm:"type:uuid;not null"                             json:"tenant_id"`
 	SenderID       *uuid.UUID       `gorm:"type:uuid"                                      json:"sender_id,omitempty"`
+	Sender         *User            `gorm:"foreignKey:SenderID"                            json:"-"`
 	Type           MessageType      `gorm:"not null;default:'TEXT'"                        json:"type"`
 	Content        string           `gorm:"type:text;default:''"                           json:"content"`
 	MediaURL       string           `gorm:"default:''"                                     json:"media_url,omitempty"`
@@ -699,18 +700,25 @@ func (a *AIConfig) BeforeCreate(tx *gorm.DB) error {
 // ─── Plan Definitions (Admin-manageable) ─────────────────────────────────────
 
 type PlanDef struct {
-	ID           uuid.UUID `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
-	Name         string    `gorm:"not null;uniqueIndex"                          json:"name"`
-	Label        string    `gorm:"not null"                                      json:"label"`
-	PriceUSD     float64   `gorm:"not null"                                      json:"price_usd"`
-	Sessions     int       `gorm:"not null;default:1"                            json:"sessions"`
-	MessagesDay  int       `gorm:"not null;default:500"                          json:"messages_day"`
-	Agents       int       `gorm:"not null;default:2"                            json:"agents"`
-	Features     string    `gorm:"type:text;default:'[]'"                        json:"features"`
-	IsCustom     bool      `gorm:"default:false"                                 json:"is_custom"`
-	IsActive     bool      `gorm:"default:true"                                  json:"is_active"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID               uuid.UUID `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	Name             string    `gorm:"not null;uniqueIndex"                          json:"name"`
+	Label            string    `gorm:"not null"                                      json:"label"`
+	PriceUSD         float64   `gorm:"not null"                                      json:"price_usd"`
+	OriginalPriceUSD float64   `gorm:"not null;default:0"                            json:"original_price_usd"`
+	Period           string    `gorm:"not null;default:'mo'"                         json:"period"`
+	IntervalCount    int       `gorm:"not null;default:1"                            json:"interval_count"`
+	Desc             string    `gorm:"type:text;default:''"                          json:"desc"`
+	Badge            string    `gorm:"default:''"                                    json:"badge"`
+	CTA              string    `gorm:"not null;default:'Start free'"                 json:"cta"`
+	SortOrder        int       `gorm:"default:0"                                     json:"sort_order"`
+	Sessions         int       `gorm:"not null;default:1"                            json:"sessions"`
+	MessagesDay      int       `gorm:"not null;default:500"                          json:"messages_day"`
+	Agents           int       `gorm:"not null;default:2"                            json:"agents"`
+	Features         string    `gorm:"type:text;default:'[]'"                        json:"features"`
+	IsCustom         bool      `gorm:"default:false"                                 json:"is_custom"`
+	IsActive         bool      `gorm:"default:true"                                  json:"is_active"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 func (p *PlanDef) BeforeCreate(tx *gorm.DB) error {

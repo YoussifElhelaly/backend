@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+	"whatify/backend/internal/billing"
 	"whatify/backend/internal/features"
 	"whatify/backend/internal/models"
 	"whatify/backend/pkg/database"
@@ -24,13 +25,20 @@ func handleListPlans(c *gin.Context) {
 }
 
 type CreatePlanRequest struct {
-	Name        string   `json:"name"        binding:"required"`
-	Label       string   `json:"label"       binding:"required"`
-	PriceUSD    float64  `json:"price_usd"   binding:"required,min=0"`
-	Sessions    int      `json:"sessions"    binding:"required,min=1"`
-	MessagesDay int      `json:"messages_day" binding:"required,min=-1"`
-	Agents      int      `json:"agents"      binding:"required,min=-1"`
-	Features    []string `json:"features"`
+	Name             string   `json:"name"         binding:"required"`
+	Label            string   `json:"label"        binding:"required"`
+	PriceUSD         float64  `json:"price_usd"    binding:"required,min=0"`
+	OriginalPriceUSD float64  `json:"original_price_usd"`
+	Period           string   `json:"period"`
+	IntervalCount    int      `json:"interval_count"`
+	Desc             string   `json:"desc"`
+	Badge            string   `json:"badge"`
+	CTA              string   `json:"cta"`
+	SortOrder        int      `json:"sort_order"`
+	Sessions         int      `json:"sessions"     binding:"required,min=1"`
+	MessagesDay      int      `json:"messages_day" binding:"required,min=-1"`
+	Agents           int      `json:"agents"       binding:"required,min=-1"`
+	Features         []string `json:"features"`
 }
 
 func handleCreatePlan(c *gin.Context) {
@@ -47,33 +55,64 @@ func handleCreatePlan(c *gin.Context) {
 		return
 	}
 
+	period := req.Period
+	if period == "" {
+		period = "mo"
+	}
+	cta := req.CTA
+	if cta == "" {
+		cta = "Start free"
+	}
+
+	intervalCount := req.IntervalCount
+	if intervalCount < 1 {
+		intervalCount = 1
+	}
+
 	plan := models.PlanDef{
-		Name:        req.Name,
-		Label:       req.Label,
-		PriceUSD:    req.PriceUSD,
-		Sessions:    req.Sessions,
-		MessagesDay: req.MessagesDay,
-		Agents:      req.Agents,
-		Features:    features.ToJSON(req.Features),
-		IsCustom:    true,
-		IsActive:    true,
+		Name:             req.Name,
+		Label:            req.Label,
+		PriceUSD:         req.PriceUSD,
+		OriginalPriceUSD: req.OriginalPriceUSD,
+		Period:           period,
+		IntervalCount:    intervalCount,
+		Desc:             req.Desc,
+		Badge:            req.Badge,
+		CTA:              cta,
+		SortOrder:        req.SortOrder,
+		Sessions:         req.Sessions,
+		MessagesDay:      req.MessagesDay,
+		Agents:           req.Agents,
+		Features:         features.ToJSON(req.Features),
+		IsCustom:         true,
+		IsActive:         true,
 	}
 	if err := database.DB.Create(&plan).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
+	// Trigger PayPal plan creation for the new custom plan in the background
+	go billing.SetupPayPalPlans()
+
 	c.JSON(http.StatusCreated, plan)
 }
 
 type UpdatePlanRequest struct {
-	Label       *string   `json:"label"`
-	PriceUSD    *float64  `json:"price_usd"`
-	Sessions    *int      `json:"sessions"`
-	MessagesDay *int      `json:"messages_day"`
-	Agents      *int      `json:"agents"`
-	IsActive    *bool     `json:"is_active"`
-	Features    *[]string `json:"features"`
+	Label            *string   `json:"label"`
+	PriceUSD         *float64  `json:"price_usd"`
+	OriginalPriceUSD *float64  `json:"original_price_usd"`
+	Period           *string   `json:"period"`
+	IntervalCount    *int      `json:"interval_count"`
+	Desc             *string   `json:"desc"`
+	Badge            *string   `json:"badge"`
+	CTA              *string   `json:"cta"`
+	SortOrder        *int      `json:"sort_order"`
+	Sessions         *int      `json:"sessions"`
+	MessagesDay      *int      `json:"messages_day"`
+	Agents           *int      `json:"agents"`
+	IsActive         *bool     `json:"is_active"`
+	Features         *[]string `json:"features"`
 }
 
 func handleUpdatePlan(c *gin.Context) {
@@ -97,6 +136,27 @@ func handleUpdatePlan(c *gin.Context) {
 	if req.PriceUSD != nil {
 		updates["price_usd"] = *req.PriceUSD
 	}
+	if req.OriginalPriceUSD != nil {
+		updates["original_price_usd"] = *req.OriginalPriceUSD
+	}
+	if req.Period != nil {
+		updates["period"] = *req.Period
+	}
+	if req.IntervalCount != nil {
+		updates["interval_count"] = *req.IntervalCount
+	}
+	if req.Desc != nil {
+		updates["desc"] = *req.Desc
+	}
+	if req.Badge != nil {
+		updates["badge"] = *req.Badge
+	}
+	if req.CTA != nil {
+		updates["cta"] = *req.CTA
+	}
+	if req.SortOrder != nil {
+		updates["sort_order"] = *req.SortOrder
+	}
 	if req.Sessions != nil {
 		updates["sessions"] = *req.Sessions
 	}
@@ -118,6 +178,9 @@ func handleUpdatePlan(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
+		
+		// Synchronize plans with PayPal in the background so changes take effect immediately
+		go billing.SetupPayPalPlans()
 	}
 
 	database.DB.First(&plan, "id = ?", id)

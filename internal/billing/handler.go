@@ -16,7 +16,6 @@ import (
 	"time"
 	"whatify/backend/internal/middleware"
 	"whatify/backend/internal/models"
-	"whatify/backend/pkg/database"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -46,15 +45,10 @@ func handleCheckout(c *gin.Context) {
 	}
 
 	plan := models.Plan(req.Plan)
-	if _, ok := PlanDefs[plan]; !ok {
-		// Check for custom plan in database
-		var planDef models.PlanDef
-		if err := database.DB.Where("name = ? AND is_active = true", req.Plan).First(&planDef).Error; err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid plan"})
-			return
-		}
-		// Use custom plan name
-		_ = planDef
+	limits := GetLimits(plan)
+	if limits.Label == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid plan"})
+		return
 	}
 
 	result, err := Checkout(tenantID, plan)

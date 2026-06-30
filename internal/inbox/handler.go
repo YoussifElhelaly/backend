@@ -49,6 +49,8 @@ func RegisterRoutes(r *gin.RouterGroup) {
 
 func listConversations(c *gin.Context) {
 	tenantID := c.MustGet(middleware.CtxTenantID).(uuid.UUID)
+	userID := c.MustGet(middleware.CtxUserID).(uuid.UUID)
+	role, _ := c.Get(middleware.CtxRole)
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "30"))
 	sessionPhone := c.Query("session_phone")
@@ -59,8 +61,14 @@ func listConversations(c *gin.Context) {
 		limit = 30
 	}
 
+	// AGENT role: only see conversations assigned to them
+	var agentFilter *uuid.UUID
+	if role == "AGENT" {
+		agentFilter = &userID
+	}
+
 	chatType := c.Query("chat_type")
-	convs, err := getConversations(tenantID, page, limit, sessionPhone, chatType)
+	convs, err := getConversations(tenantID, page, limit, sessionPhone, chatType, agentFilter)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -237,7 +245,21 @@ func handleSend(c *gin.Context) {
 	// Check daily outbound message limit before hitting WhatsApp
 	if conv.SessionPhone != "" {
 		if limitErr := billing.CheckDailyMessageLimit(tenantID, conv.SessionPhone); limitErr != nil {
-			c.JSON(http.StatusTooManyRequests, gin.H{"error": limitErr.Error(), "code": "daily_limit_exceeded"})
+			var tenant models.Tenant
+			database.DB.Select("created_at, daily_message_limit").Where("id = ?", tenantID).First(&tenant)
+			daysSince := int(time.Since(tenant.CreatedAt).Hours() / 24)
+			canContact := daysSince >= 7
+			daysRemaining := 0
+			if !canContact {
+				daysRemaining = 7 - daysSince
+			}
+			c.JSON(http.StatusTooManyRequests, gin.H{
+				"error":               limitErr.Error(),
+				"code":                "daily_limit_reached",
+				"limit":               tenant.DailyMessageLimit,
+				"can_contact_support": canContact,
+				"days_remaining":      daysRemaining,
+			})
 			return
 		}
 	}
@@ -391,6 +413,14 @@ func handleAssign(c *gin.Context) {
 	}
 	activity.Log(tenantID, &userID, "conversation.assigned", "conversation", convID.String(), meta)
 	go webhooks.Dispatch(tenantID, "conversation.assigned", meta)
+
+	if conv, _ := getConversationByID(tenantID, convID); conv != nil {
+		GlobalHub.Broadcast(tenantID.String(), WSEvent{
+			Event: "conversation_updated",
+			Data:  conv,
+		})
+	}
+
 	c.JSON(http.StatusOK, gin.H{"message": "assigned"})
 }
 
@@ -419,6 +449,14 @@ func handleStatus(c *gin.Context) {
 	}
 	activity.Log(tenantID, &userID, action, "conversation", convID.String(), nil)
 	go webhooks.Dispatch(tenantID, action, map[string]string{"conversation_id": convID.String()})
+
+	if conv, _ := getConversationByID(tenantID, convID); conv != nil {
+		GlobalHub.Broadcast(tenantID.String(), WSEvent{
+			Event: "conversation_updated",
+			Data:  conv,
+		})
+	}
+
 	c.JSON(http.StatusOK, gin.H{"message": "updated"})
 }
 
@@ -433,6 +471,14 @@ func handleRead(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+
+	if conv, _ := getConversationByID(tenantID, convID); conv != nil {
+		GlobalHub.Broadcast(tenantID.String(), WSEvent{
+			Event: "conversation_updated",
+			Data:  conv,
+		})
+	}
+
 	c.JSON(http.StatusOK, gin.H{"message": "marked read"})
 }
 

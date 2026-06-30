@@ -347,7 +347,7 @@ func TriggerSync(tenantID uuid.UUID, sessionPhone string) {
 
 	GlobalHub.Broadcast(tenantID.String(), WSEvent{Event: "sync_start", Data: nil})
 
-	convs, err := getConversations(tenantID, 1, 1000, sessionPhone, "")
+	convs, err := getConversations(tenantID, 1, 1000, sessionPhone, "", nil)
 	if err != nil {
 		log.Printf("sync error fetching convs: %v", err)
 		return

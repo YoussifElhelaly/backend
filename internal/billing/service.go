@@ -38,12 +38,9 @@ func SeedBuiltinPlans() {
 		if err := database.DB.Where("name = ?", p.Name).First(&existing).Error; err != nil {
 			database.DB.Create(&p)
 		} else {
-			existingFeatures := features.ParseFeatures(existing.Features)
-			if len(existingFeatures) == 0 {
-				// Backfill features for existing built-in plans that were created before
-				// this feature, or that have empty/null/"[]" features.
-				database.DB.Model(&existing).Update("features", p.Features)
-			}
+			// Always overwrite features for built-in plans to ensure they use
+			// proper gateable keys (not human-readable display strings).
+			database.DB.Model(&existing).Update("features", p.Features)
 		}
 	}
 }
@@ -55,10 +52,7 @@ type CheckoutResult struct {
 
 // Checkout creates a PayPal subscription and returns the approval URL.
 func Checkout(tenantID uuid.UUID, plan models.Plan) (*CheckoutResult, error) {
-	limits, ok := PlanDefs[plan]
-	if !ok {
-		return nil, fmt.Errorf("invalid plan: %s", plan)
-	}
+	limits := GetLimits(plan)
 
 	frontendURL := os.Getenv("FRONTEND_URL")
 	if frontendURL == "" {
@@ -123,7 +117,22 @@ func ActivateSubscription(paypalSubID string) error {
 	tenantID := sub.TenantID
 	plan := sub.Plan
 	now := time.Now()
+	
 	expiresAt := now.AddDate(0, 1, 0)
+	if ppSub.BillingInfo.NextBillingTime != "" {
+		if parsed, err := time.Parse(time.RFC3339, ppSub.BillingInfo.NextBillingTime); err == nil {
+			expiresAt = parsed
+		}
+	} else {
+		var planDef models.PlanDef
+		if err := database.DB.First(&planDef, "name = ?", string(plan)).Error; err == nil {
+			if planDef.Period == "yr" || planDef.Period == "year" {
+				expiresAt = now.AddDate(planDef.IntervalCount, 0, 0)
+			} else {
+				expiresAt = now.AddDate(0, planDef.IntervalCount, 0)
+			}
+		}
+	}
 
 	if err := database.DB.Model(&sub).Updates(map[string]interface{}{
 		"status":     models.SubStatusActive,
@@ -186,6 +195,23 @@ func handleRenewal(paypalSubID string) error {
 
 	now := time.Now()
 	expiresAt := now.AddDate(0, 1, 0)
+	if ppSub.BillingInfo.NextBillingTime != "" {
+		if parsed, err := time.Parse(time.RFC3339, ppSub.BillingInfo.NextBillingTime); err == nil {
+			expiresAt = parsed
+		}
+	} else {
+		var sub models.Subscription
+		if err := database.DB.First(&sub, "paypal_sub_id = ?", paypalSubID).Error; err == nil {
+			var planDef models.PlanDef
+			if err := database.DB.First(&planDef, "name = ?", string(sub.Plan)).Error; err == nil {
+				if planDef.Period == "yr" || planDef.Period == "year" {
+					expiresAt = now.AddDate(planDef.IntervalCount, 0, 0)
+				} else {
+					expiresAt = now.AddDate(0, planDef.IntervalCount, 0)
+				}
+			}
+		}
+	}
 
 	// Extend plan_expires_at on both subscription record and tenant.
 	database.DB.Model(&models.Subscription{}).

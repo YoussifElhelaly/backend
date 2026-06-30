@@ -176,7 +176,21 @@ func handleSendMedia(c *gin.Context) {
 
 	if conv.SessionPhone != "" {
 		if limitErr := billing.CheckDailyMessageLimit(tenantID, conv.SessionPhone); limitErr != nil {
-			c.JSON(http.StatusTooManyRequests, gin.H{"error": limitErr.Error(), "code": "daily_limit_exceeded"})
+			var tenant models.Tenant
+			database.DB.Select("created_at, daily_message_limit").Where("id = ?", tenantID).First(&tenant)
+			daysSince := int(time.Since(tenant.CreatedAt).Hours() / 24)
+			canContact := daysSince >= 7
+			daysRemaining := 0
+			if !canContact {
+				daysRemaining = 7 - daysSince
+			}
+			c.JSON(http.StatusTooManyRequests, gin.H{
+				"error":               limitErr.Error(),
+				"code":                "daily_limit_reached",
+				"limit":               tenant.DailyMessageLimit,
+				"can_contact_support": canContact,
+				"days_remaining":      daysRemaining,
+			})
 			return
 		}
 	}
