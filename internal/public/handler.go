@@ -11,20 +11,26 @@ import (
 )
 
 type PlanResponse struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Label       string   `json:"label"`
-	PriceUSD    float64  `json:"price_usd"`
-	PriceStr    string   `json:"price"`
-	Period      string   `json:"period"`
-	Desc        string   `json:"desc"`
-	Badge       string   `json:"badge"`
-	CTA         string   `json:"cta"`
-	SortOrder   int      `json:"sort_order"`
-	Sessions    int      `json:"sessions"`
-	MessagesDay int      `json:"messages_day"`
-	Agents      int      `json:"agents"`
-	Features    []string `json:"features"`
+	ID               string   `json:"id"`
+	Name             string   `json:"name"`
+	Label            string   `json:"label"`
+	PriceUSD         float64  `json:"price_usd"`
+	OriginalPriceUSD float64  `json:"original_price_usd"`
+	IntervalCount    int      `json:"interval_count"`
+	PriceStr         string   `json:"price"`
+	Period           string   `json:"period"`
+	Desc             string   `json:"desc"`
+	Badge            string   `json:"badge"`
+	CTA              string   `json:"cta"`
+	SortOrder        int      `json:"sort_order"`
+	Sessions         int      `json:"sessions"`
+	MessagesDay      int      `json:"messages_day"`
+	Agents           int      `json:"agents"`
+	Flows            int      `json:"flows"`
+	Funnels          int      `json:"funnels"`
+	QuickReplies     int      `json:"quick_replies"`
+	Campaigns        int      `json:"campaigns"`
+	Features         []string `json:"features"`
 }
 
 func listPlans(c *gin.Context) {
@@ -44,20 +50,26 @@ func listPlans(c *gin.Context) {
 		_ = json.Unmarshal([]byte(p.Features), &feats)
 
 		out = append(out, PlanResponse{
-			ID:          p.ID.String(),
-			Name:        p.Name,
-			Label:       p.Label,
-			PriceUSD:    p.PriceUSD,
-			PriceStr:    fmt.Sprintf("$%.0f", p.PriceUSD),
-			Period:      p.Period,
-			Desc:        p.Desc,
-			Badge:       p.Badge,
-			CTA:         p.CTA,
-			SortOrder:   p.SortOrder,
-			Sessions:    p.Sessions,
-			MessagesDay: p.MessagesDay,
-			Agents:      p.Agents,
-			Features:    feats,
+			ID:               p.ID.String(),
+			Name:             p.Name,
+			Label:            p.Label,
+			PriceUSD:         p.PriceUSD,
+			OriginalPriceUSD: p.OriginalPriceUSD,
+			IntervalCount:    p.IntervalCount,
+			PriceStr:         fmt.Sprintf("$%.0f", p.PriceUSD),
+			Period:           p.Period,
+			Desc:             p.Desc,
+			Badge:            p.Badge,
+			CTA:              p.CTA,
+			SortOrder:        p.SortOrder,
+			Sessions:         p.Sessions,
+			MessagesDay:      p.MessagesDay,
+			Agents:           p.Agents,
+			Flows:            p.Flows,
+			Funnels:          p.Funnels,
+			QuickReplies:     p.QuickReplies,
+			Campaigns:        p.Campaigns,
+			Features:         feats,
 		})
 	}
 

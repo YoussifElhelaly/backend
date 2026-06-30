@@ -7,58 +7,74 @@ import (
 )
 
 type defaultPlan struct {
-	Name        string
-	Label       string
-	PriceUSD    float64
-	Period      string
-	Desc        string
-	Badge       string
-	CTA         string
-	SortOrder   int
-	Sessions    int
-	MessagesDay int
-	Agents      int
+	Name         string
+	Label        string
+	PriceUSD     float64
+	Period       string
+	Desc         string
+	Badge        string
+	CTA          string
+	SortOrder    int
+	Sessions     int
+	MessagesDay  int
+	Agents       int
+	Flows        int
+	Funnels      int
+	QuickReplies int
+	Campaigns    int
 }
 
 var defaultPlans = []defaultPlan{
 	{
-		Name:        "STARTER",
-		Label:       "Starter",
-		PriceUSD:    19,
-		Period:      "mo",
-		Desc:        "Small teams & solo operators",
-		Badge:       "",
-		CTA:         "Start free",
-		SortOrder:   1,
-		Sessions:    1,
-		MessagesDay: 500,
-		Agents:      2,
+		Name:         "STARTER",
+		Label:        "Starter",
+		PriceUSD:     19,
+		Period:       "mo",
+		Desc:         "Small teams & solo operators",
+		Badge:        "",
+		CTA:          "Start free",
+		SortOrder:    1,
+		Sessions:     1,
+		MessagesDay:  500,
+		Agents:       2,
+		Flows:        2,
+		Funnels:      1,
+		QuickReplies: 10,
+		Campaigns:    5,
 	},
 	{
-		Name:        "GROWTH",
-		Label:       "Growth",
-		PriceUSD:    49,
-		Period:      "mo",
-		Desc:        "Growing businesses",
-		Badge:       "Most Popular",
-		CTA:         "Start free",
-		SortOrder:   2,
-		Sessions:    5,
-		MessagesDay: 5000,
-		Agents:      10,
+		Name:         "GROWTH",
+		Label:        "Growth",
+		PriceUSD:     49,
+		Period:       "mo",
+		Desc:         "Growing businesses",
+		Badge:        "Most Popular",
+		CTA:          "Start free",
+		SortOrder:    2,
+		Sessions:     5,
+		MessagesDay:  5000,
+		Agents:       10,
+		Flows:        10,
+		Funnels:      5,
+		QuickReplies: 50,
+		Campaigns:    -1,
 	},
 	{
-		Name:        "SCALE",
-		Label:       "Scale",
-		PriceUSD:    99,
-		Period:      "mo",
-		Desc:        "Agencies & enterprises",
-		Badge:       "",
-		CTA:         "Contact sales",
-		SortOrder:   3,
-		Sessions:    20,
-		MessagesDay: -1,
-		Agents:      -1,
+		Name:         "SCALE",
+		Label:        "Scale",
+		PriceUSD:     99,
+		Period:       "mo",
+		Desc:         "Agencies & enterprises",
+		Badge:        "",
+		CTA:          "Contact sales",
+		SortOrder:    3,
+		Sessions:     20,
+		MessagesDay:  -1,
+		Agents:       -1,
+		Flows:        -1,
+		Funnels:      -1,
+		QuickReplies: -1,
+		Campaigns:    -1,
 	},
 }
 
@@ -88,6 +104,10 @@ func SeedDefaultPlans() {
 			Sessions:      p.Sessions,
 			MessagesDay:   p.MessagesDay,
 			Agents:        p.Agents,
+			Flows:         p.Flows,
+			Funnels:       p.Funnels,
+			QuickReplies:  p.QuickReplies,
+			Campaigns:     p.Campaigns,
 			IsCustom:      false,
 			IsActive:      true,
 		}

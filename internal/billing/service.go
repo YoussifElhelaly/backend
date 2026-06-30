@@ -26,11 +26,11 @@ func FixTrialDates() {
 // SeedBuiltinPlans ensures the 3 built-in plans exist in the plan_defs table.
 func SeedBuiltinPlans() {
 	builtin := []models.PlanDef{
-		{Name: "STARTER", Label: "Starter", PriceUSD: 19, Sessions: 1, MessagesDay: 500, Agents: 2, IsCustom: false, IsActive: true,
+		{Name: "STARTER", Label: "Starter", PriceUSD: 19, Sessions: 1, MessagesDay: 500, Agents: 2, Flows: 2, Funnels: 1, QuickReplies: 10, Campaigns: 5, IsCustom: false, IsActive: true,
 			Features: features.ToJSON(features.DefaultFeatures[models.PlanStarter])},
-		{Name: "GROWTH", Label: "Growth", PriceUSD: 49, Sessions: 5, MessagesDay: 5000, Agents: 10, IsCustom: false, IsActive: true,
+		{Name: "GROWTH", Label: "Growth", PriceUSD: 49, Sessions: 5, MessagesDay: 5000, Agents: 10, Flows: 10, Funnels: 5, QuickReplies: 50, Campaigns: -1, IsCustom: false, IsActive: true,
 			Features: features.ToJSON(features.DefaultFeatures[models.PlanGrowth])},
-		{Name: "SCALE", Label: "Scale", PriceUSD: 99, Sessions: 20, MessagesDay: -1, Agents: -1, IsCustom: false, IsActive: true,
+		{Name: "SCALE", Label: "Scale", PriceUSD: 99, Sessions: 20, MessagesDay: -1, Agents: -1, Flows: -1, Funnels: -1, QuickReplies: -1, Campaigns: -1, IsCustom: false, IsActive: true,
 			Features: features.ToJSON(features.DefaultFeatures[models.PlanScale])},
 	}
 	for _, p := range builtin {
@@ -38,9 +38,16 @@ func SeedBuiltinPlans() {
 		if err := database.DB.Where("name = ?", p.Name).First(&existing).Error; err != nil {
 			database.DB.Create(&p)
 		} else {
-			// Always overwrite features for built-in plans to ensure they use
-			// proper gateable keys (not human-readable display strings).
-			database.DB.Model(&existing).Update("features", p.Features)
+			// Always sync limit fields and features for built-in plans so that
+			// newly added columns (flows, funnels, quick_replies, campaigns) get
+			// the correct values even on existing databases.
+			database.DB.Model(&existing).Updates(map[string]interface{}{
+				"flows":         p.Flows,
+				"funnels":       p.Funnels,
+				"quick_replies": p.QuickReplies,
+				"campaigns":     p.Campaigns,
+				"features":      p.Features,
+			})
 		}
 	}
 }

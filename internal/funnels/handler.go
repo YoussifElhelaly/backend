@@ -63,6 +63,8 @@ type StepInput struct {
 	MediaBase64 string   `json:"media_base64"` // optional image (raw base64 or data URL)
 	MediaMime   string   `json:"media_mime"`
 	MediaName   string   `json:"media_name"`
+	DelayHours         int  `json:"delay_hours"`          // 0 = no timed advance
+	DelayFromStepOrder *int `json:"delay_from_step_order"` // 1-indexed order of the baseline step; nil = from this step's entry
 }
 
 type CreateFunnelInput struct {
@@ -82,6 +84,11 @@ func createFunnel(c *gin.Context) {
 	var input CreateFunnelInput
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := billing.CheckFunnelLimit(tenantID); err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
 		return
 	}
 
@@ -129,6 +136,7 @@ func createFunnel(c *gin.Context) {
 			MediaPayload: media,
 			MediaMime:    mime,
 			MediaName:    s.MediaName,
+			DelayHours:   s.DelayHours,
 		}
 		if err := database.DB.Create(&step).Error; err != nil {
 			slog.Error("funnels: failed to create step", "step_name", s.Name, "funnel_id", funnel.ID, "error", err)
@@ -137,6 +145,17 @@ func createFunnel(c *gin.Context) {
 			return
 		}
 		funnel.Steps = append(funnel.Steps, step)
+	}
+
+	// Second pass: resolve delay_from_step_order → actual step ID now that all steps have IDs
+	for i, s := range input.Steps {
+		if s.DelayFromStepOrder != nil && *s.DelayFromStepOrder > 0 {
+			var refStep models.FunnelStep
+			if database.DB.Where("funnel_id = ? AND \"order\" = ?", funnel.ID, *s.DelayFromStepOrder).First(&refStep).Error == nil {
+				database.DB.Model(&funnel.Steps[i]).Update("delay_from_step_id", refStep.ID)
+				funnel.Steps[i].DelayFromStepID = &refStep.ID
+			}
+		}
 	}
 
 	activity.Log(tenantID, &userID, "funnel.created", "funnel", funnel.ID.String(), map[string]string{
@@ -270,16 +289,26 @@ func addStep(c *gin.Context) {
 			variantsJSON = string(b)
 		}
 	}
+	var delayFromStepID *uuid.UUID
+	if input.DelayFromStepOrder != nil && *input.DelayFromStepOrder > 0 {
+		var refStep models.FunnelStep
+		if database.DB.Where("funnel_id = ? AND \"order\" = ?", funnel.ID, *input.DelayFromStepOrder).First(&refStep).Error == nil {
+			delayFromStepID = &refStep.ID
+		}
+	}
+
 	step := models.FunnelStep{
-		FunnelID:     funnel.ID,
-		Order:        maxOrder + 1,
-		Name:         input.Name,
-		Type:         models.FunnelStepType(input.Type),
-		Message:      input.Message,
-		Variants:     variantsJSON,
-		MediaPayload: media,
-		MediaMime:    mime,
-		MediaName:    input.MediaName,
+		FunnelID:        funnel.ID,
+		Order:           maxOrder + 1,
+		Name:            input.Name,
+		Type:            models.FunnelStepType(input.Type),
+		Message:         input.Message,
+		Variants:        variantsJSON,
+		MediaPayload:    media,
+		MediaMime:       mime,
+		MediaName:       input.MediaName,
+		DelayHours:      input.DelayHours,
+		DelayFromStepID: delayFromStepID,
 	}
 	database.DB.Create(&step)
 	c.JSON(http.StatusCreated, step)
@@ -305,13 +334,15 @@ func updateStep(c *gin.Context) {
 	}
 
 	var input struct {
-		Name        string   `json:"name"`
-		Type        string   `json:"type"`
-		Message     string   `json:"message"`
-		Variants    []string `json:"variants"`
-		MediaBase64 string   `json:"media_base64"`
-		MediaMime   string   `json:"media_mime"`
-		MediaName   string   `json:"media_name"`
+		Name               string   `json:"name"`
+		Type               string   `json:"type"`
+		Message            string   `json:"message"`
+		Variants           []string `json:"variants"`
+		MediaBase64        string   `json:"media_base64"`
+		MediaMime          string   `json:"media_mime"`
+		MediaName          string   `json:"media_name"`
+		DelayHours         *int     `json:"delay_hours"`
+		DelayFromStepOrder *int     `json:"delay_from_step_order"` // -1 = clear, 0 = ignore, >0 = set
 	}
 	c.ShouldBindJSON(&input)
 
@@ -323,6 +354,20 @@ func updateStep(c *gin.Context) {
 	}
 	if input.Message != "" {
 		step.Message = input.Message
+	}
+	if input.DelayHours != nil {
+		step.DelayHours = *input.DelayHours
+	}
+	if input.DelayFromStepOrder != nil {
+		if *input.DelayFromStepOrder <= 0 {
+			// -1 or 0 → clear the reference
+			step.DelayFromStepID = nil
+		} else {
+			var refStep models.FunnelStep
+			if database.DB.Where("funnel_id = ? AND \"order\" = ?", funnel.ID, *input.DelayFromStepOrder).First(&refStep).Error == nil {
+				step.DelayFromStepID = &refStep.ID
+			}
+		}
 	}
 	if input.Variants != nil {
 		if b, _ := json.Marshal(input.Variants); b != nil {
@@ -1040,6 +1085,125 @@ func decodeMedia(b64, mime string) ([]byte, string, error) {
 		mime = "audio/ogg; codecs=opus"
 	}
 	return data, mime, nil
+}
+
+// ── Timed Advance Worker ──────────────────────────────────────────────────────
+
+// StartTimedAdvanceWorker runs every 5 minutes and auto-advances contacts that
+// have spent more than delay_hours on their current step.
+func StartTimedAdvanceWorker(ctx context.Context) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("funnels: PANIC in timed advance worker", "panic", r)
+			}
+		}()
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				processTimedAdvances()
+			}
+		}
+	}()
+}
+
+func processTimedAdvances() {
+	now := time.Now()
+
+	// Load all active contacts whose current step has a time-based delay, in active funnels.
+	// Filtering to the exact time threshold happens in Go so we can support both
+	// "count from this step's entry" (last_moved_at) and "count from another step's entry"
+	// (delay_from_step_id → funnel_contact_history lookup).
+	var fcs []models.FunnelContact
+	database.DB.
+		Select("funnel_contacts.*").
+		Preload("Funnel").
+		Preload("CurrentStep").
+		Joins("JOIN funnel_steps AS step_t ON step_t.id = funnel_contacts.current_step_id AND step_t.delay_hours > 0 AND step_t.deleted_at IS NULL").
+		Joins("JOIN funnels AS funnel_t ON funnel_t.id = funnel_contacts.funnel_id AND funnel_t.status = 'ACTIVE' AND funnel_t.deleted_at IS NULL").
+		Where("funnel_contacts.status = 'ACTIVE'").
+		Find(&fcs)
+
+	for _, fc := range fcs {
+		baseline, ok := resolveTimerBaseline(fc, now)
+		if !ok {
+			continue
+		}
+		if now.Sub(baseline) >= time.Duration(fc.CurrentStep.DelayHours)*time.Hour {
+			advanceContactByTimer(fc)
+		}
+	}
+}
+
+// resolveTimerBaseline returns the time from which the delay should be counted.
+// If delay_from_step_id is set, it looks up when the contact first entered that step.
+// Returns (baseline, true) or (zero, false) if the reference step has no history entry.
+func resolveTimerBaseline(fc models.FunnelContact, now time.Time) (time.Time, bool) {
+	if fc.CurrentStep.DelayFromStepID == nil {
+		return fc.LastMovedAt, true
+	}
+	var h models.FunnelContactHistory
+	if err := database.DB.
+		Where("funnel_id = ? AND contact_id = ? AND to_step_id = ?",
+			fc.FunnelID, fc.ContactID, *fc.CurrentStep.DelayFromStepID).
+		Order("created_at ASC").
+		First(&h).Error; err != nil {
+		return time.Time{}, false
+	}
+	return h.CreatedAt, true
+}
+
+func advanceContactByTimer(fc models.FunnelContact) {
+	var nextStep models.FunnelStep
+	if err := database.DB.Where("funnel_id = ? AND \"order\" = ?", fc.FunnelID, fc.CurrentStep.Order+1).
+		First(&nextStep).Error; err != nil {
+		// No next step — funnel is complete for this contact
+		database.DB.Model(&fc).Update("status", models.FunnelContactConverted)
+		database.DB.Create(&models.FunnelContactHistory{
+			FunnelID:   fc.FunnelID,
+			ContactID:  fc.ContactID,
+			FromStepID: &fc.CurrentStepID,
+			ToStepID:   fc.CurrentStepID,
+			Trigger:    "AUTO_TIME_END",
+		})
+		return
+	}
+
+	fromStepID := fc.CurrentStepID
+	now := time.Now()
+	database.DB.Model(&fc).Updates(map[string]interface{}{
+		"current_step_id": nextStep.ID,
+		"last_moved_at":   now,
+	})
+	database.DB.Create(&models.FunnelContactHistory{
+		FunnelID:   fc.FunnelID,
+		ContactID:  fc.ContactID,
+		FromStepID: &fromStepID,
+		ToStepID:   nextStep.ID,
+		Trigger:    "AUTO_TIME",
+	})
+
+	if nextStep.Message != "" || len(nextStep.MediaPayload) > 0 {
+		if limitErr := billing.CheckDailyMessageLimit(fc.Funnel.TenantID, fc.Funnel.SessionPhone); limitErr != nil {
+			slog.Warn("funnels: daily limit reached, skipping timed advance send", "funnel_id", fc.FunnelID, "error", limitErr)
+			return
+		}
+		var contact models.Contact
+		if database.DB.First(&contact, "id = ?", fc.ContactID).Error == nil {
+			go func() {
+				if err := sendStepViaSession(fc.Funnel.SessionPhone, fc.Funnel.TenantID, contact.PhoneNumber, nextStep, contact); err == nil {
+					billing.IncrementDailyCount(fc.Funnel.TenantID, fc.Funnel.SessionPhone)
+				}
+			}()
+		}
+	}
+
+	slog.Info("funnels: contact auto-advanced by timer",
+		"contact_id", fc.ContactID, "from_step", fromStepID, "to_step", nextStep.Name, "funnel", fc.Funnel.Name)
 }
 
 // ── Timeout Worker ───────────────────────────────────────────────────────────

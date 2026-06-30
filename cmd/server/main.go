@@ -246,6 +246,7 @@ func main() {
 	billing.SeedBuiltinPlans()
 	billing.FixTrialDates()
 	funnels.StartTimeoutWorker(ctx)
+	funnels.StartTimedAdvanceWorker(ctx)
 
 	port := os.Getenv("PORT")
 	if port == "" {

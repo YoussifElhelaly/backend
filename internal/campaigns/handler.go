@@ -76,6 +76,11 @@ func createCampaign(c *gin.Context) {
 		return
 	}
 
+	if err := billing.CheckCampaignLimit(tenantID); err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+		return
+	}
+
 	// Resolve contacts from contact_ids + tag_ids
 	contactMap := map[uuid.UUID]bool{}
 	if len(input.ContactIDs) > 0 {

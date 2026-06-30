@@ -11,17 +11,21 @@ import (
 )
 
 type PlanLimits struct {
-	Sessions    int // -1 = unlimited
-	MessagesDay int // -1 = unlimited
-	Agents      int // -1 = unlimited
-	PriceUSD    float64
-	Label       string
+	Sessions     int // -1 = unlimited
+	MessagesDay  int // -1 = unlimited
+	Agents       int // -1 = unlimited
+	Flows        int // -1 = unlimited (active flows)
+	Funnels      int // -1 = unlimited (active funnels)
+	QuickReplies int // -1 = unlimited (total)
+	Campaigns    int // -1 = unlimited (total non-deleted)
+	PriceUSD     float64
+	Label        string
 }
 
 var PlanDefs = map[models.Plan]PlanLimits{
-	models.PlanStarter: {Sessions: 1, MessagesDay: 500, Agents: 2, PriceUSD: 19, Label: "Starter"},
-	models.PlanGrowth:  {Sessions: 5, MessagesDay: 5000, Agents: 10, PriceUSD: 49, Label: "Growth"},
-	models.PlanScale:   {Sessions: 20, MessagesDay: -1, Agents: -1, PriceUSD: 99, Label: "Scale"},
+	models.PlanStarter: {Sessions: 1, MessagesDay: 500, Agents: 2, Flows: 2, Funnels: 1, QuickReplies: 10, Campaigns: 5, PriceUSD: 19, Label: "Starter"},
+	models.PlanGrowth:  {Sessions: 5, MessagesDay: 5000, Agents: 10, Flows: 10, Funnels: 5, QuickReplies: 50, Campaigns: -1, PriceUSD: 49, Label: "Growth"},
+	models.PlanScale:   {Sessions: 20, MessagesDay: -1, Agents: -1, Flows: -1, Funnels: -1, QuickReplies: -1, Campaigns: -1, PriceUSD: 99, Label: "Scale"},
 }
 
 func GetLimits(plan models.Plan) PlanLimits {
@@ -29,11 +33,15 @@ func GetLimits(plan models.Plan) PlanLimits {
 	var planDef models.PlanDef
 	if err := database.DB.Where("name = ? AND is_active = true", plan).First(&planDef).Error; err == nil {
 		return PlanLimits{
-			Sessions:    planDef.Sessions,
-			MessagesDay: planDef.MessagesDay,
-			Agents:      planDef.Agents,
-			PriceUSD:    planDef.PriceUSD,
-			Label:       planDef.Label,
+			Sessions:     planDef.Sessions,
+			MessagesDay:  planDef.MessagesDay,
+			Agents:       planDef.Agents,
+			Flows:        planDef.Flows,
+			Funnels:      planDef.Funnels,
+			QuickReplies: planDef.QuickReplies,
+			Campaigns:    planDef.Campaigns,
+			PriceUSD:     planDef.PriceUSD,
+			Label:        planDef.Label,
 		}
 	}
 	// Fallback to hardcoded for safety
@@ -180,6 +188,98 @@ func CheckAgentLimit(tenantID uuid.UUID) error {
 
 	if int(count) >= limits.Agents {
 		return fmt.Errorf("your %s plan allows up to %d team members. Upgrade to add more", limits.Label, limits.Agents)
+	}
+	return nil
+}
+
+// CheckFlowLimit checks if the tenant can create another active flow.
+func CheckFlowLimit(tenantID uuid.UUID) error {
+	var tenant models.Tenant
+	if err := database.DB.First(&tenant, "id = ?", tenantID).Error; err != nil {
+		return nil
+	}
+
+	limits := GetLimits(tenant.Plan)
+	if limits.Flows == -1 {
+		return nil
+	}
+
+	var count int64
+	database.DB.Model(&models.Flow{}).
+		Where("tenant_id = ? AND is_active = true", tenantID).
+		Count(&count)
+
+	if int(count) >= limits.Flows {
+		return fmt.Errorf("your %s plan allows up to %d active automation flow(s). Upgrade or disable an existing flow to add more", limits.Label, limits.Flows)
+	}
+	return nil
+}
+
+// CheckFunnelLimit checks if the tenant can create another active funnel.
+func CheckFunnelLimit(tenantID uuid.UUID) error {
+	var tenant models.Tenant
+	if err := database.DB.First(&tenant, "id = ?", tenantID).Error; err != nil {
+		return nil
+	}
+
+	limits := GetLimits(tenant.Plan)
+	if limits.Funnels == -1 {
+		return nil
+	}
+
+	var count int64
+	database.DB.Model(&models.Funnel{}).
+		Where("tenant_id = ? AND status = ?", tenantID, "ACTIVE").
+		Count(&count)
+
+	if int(count) >= limits.Funnels {
+		return fmt.Errorf("your %s plan allows up to %d active funnel(s). Upgrade or pause an existing funnel to add more", limits.Label, limits.Funnels)
+	}
+	return nil
+}
+
+// CheckQuickReplyLimit checks if the tenant can create another quick reply.
+func CheckQuickReplyLimit(tenantID uuid.UUID) error {
+	var tenant models.Tenant
+	if err := database.DB.First(&tenant, "id = ?", tenantID).Error; err != nil {
+		return nil
+	}
+
+	limits := GetLimits(tenant.Plan)
+	if limits.QuickReplies == -1 {
+		return nil
+	}
+
+	var count int64
+	database.DB.Model(&models.QuickReply{}).
+		Where("tenant_id = ?", tenantID).
+		Count(&count)
+
+	if int(count) >= limits.QuickReplies {
+		return fmt.Errorf("your %s plan allows up to %d quick reply template(s). Upgrade or delete an existing one to add more", limits.Label, limits.QuickReplies)
+	}
+	return nil
+}
+
+// CheckCampaignLimit checks if the tenant can create another campaign.
+func CheckCampaignLimit(tenantID uuid.UUID) error {
+	var tenant models.Tenant
+	if err := database.DB.First(&tenant, "id = ?", tenantID).Error; err != nil {
+		return nil
+	}
+
+	limits := GetLimits(tenant.Plan)
+	if limits.Campaigns == -1 {
+		return nil
+	}
+
+	var count int64
+	database.DB.Model(&models.Campaign{}).
+		Where("tenant_id = ?", tenantID).
+		Count(&count)
+
+	if int(count) >= limits.Campaigns {
+		return fmt.Errorf("your %s plan allows up to %d campaign(s). Upgrade or delete an existing campaign to add more", limits.Label, limits.Campaigns)
 	}
 	return nil
 }

@@ -363,6 +363,8 @@ type FunnelStep struct {
 	MediaPayload []byte         `gorm:"type:bytea"                                  json:"-"`
 	MediaMime    string         `gorm:"default:''"                                  json:"media_mime,omitempty"`
 	MediaName    string         `gorm:"default:''"                                  json:"media_name,omitempty"`
+	DelayHours       int        `gorm:"not null;default:0"                          json:"delay_hours"`
+	DelayFromStepID  *uuid.UUID `gorm:"type:uuid"                                   json:"delay_from_step_id,omitempty"`
 	CreatedAt    time.Time      `json:"created_at"`
 	DeletedAt    gorm.DeletedAt `gorm:"index"                                       json:"-"`
 }
@@ -512,6 +514,8 @@ type Product struct {
 	Price       float64        `gorm:"default:0"                                      json:"price"`
 	Description string         `gorm:"type:text;default:''"                           json:"description"`
 	ImageURL    string         `gorm:"default:''"                                     json:"image_url"`
+	ImageData   []byte         `gorm:"type:bytea"                                     json:"-"`
+	ImageMime   string         `gorm:"default:''"                                     json:"-"`
 	Link        string         `gorm:"default:''"                                     json:"link"`
 	CreatedAt   time.Time      `json:"created_at"`
 	UpdatedAt   time.Time      `json:"updated_at"`
@@ -714,6 +718,10 @@ type PlanDef struct {
 	Sessions         int       `gorm:"not null;default:1"                            json:"sessions"`
 	MessagesDay      int       `gorm:"not null;default:500"                          json:"messages_day"`
 	Agents           int       `gorm:"not null;default:2"                            json:"agents"`
+	Flows            int       `gorm:"not null;default:-1"                           json:"flows"`
+	Funnels          int       `gorm:"not null;default:-1"                           json:"funnels"`
+	QuickReplies     int       `gorm:"not null;default:-1"                           json:"quick_replies"`
+	Campaigns        int       `gorm:"not null;default:-1"                           json:"campaigns"`
 	Features         string    `gorm:"type:text;default:'[]'"                        json:"features"`
 	IsCustom         bool      `gorm:"default:false"                                 json:"is_custom"`
 	IsActive         bool      `gorm:"default:true"                                  json:"is_active"`

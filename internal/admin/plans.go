@@ -25,9 +25,9 @@ func handleListPlans(c *gin.Context) {
 }
 
 type CreatePlanRequest struct {
-	Name             string   `json:"name"         binding:"required"`
-	Label            string   `json:"label"        binding:"required"`
-	PriceUSD         float64  `json:"price_usd"    binding:"required,min=0"`
+	Name             string   `json:"name"          binding:"required"`
+	Label            string   `json:"label"         binding:"required"`
+	PriceUSD         float64  `json:"price_usd"     binding:"required,min=0"`
 	OriginalPriceUSD float64  `json:"original_price_usd"`
 	Period           string   `json:"period"`
 	IntervalCount    int      `json:"interval_count"`
@@ -35,9 +35,13 @@ type CreatePlanRequest struct {
 	Badge            string   `json:"badge"`
 	CTA              string   `json:"cta"`
 	SortOrder        int      `json:"sort_order"`
-	Sessions         int      `json:"sessions"     binding:"required,min=1"`
-	MessagesDay      int      `json:"messages_day" binding:"required,min=-1"`
-	Agents           int      `json:"agents"       binding:"required,min=-1"`
+	Sessions         int      `json:"sessions"      binding:"required,min=1"`
+	MessagesDay      int      `json:"messages_day"  binding:"required,min=-1"`
+	Agents           int      `json:"agents"        binding:"required,min=-1"`
+	Flows            int      `json:"flows"`
+	Funnels          int      `json:"funnels"`
+	QuickReplies     int      `json:"quick_replies"`
+	Campaigns        int      `json:"campaigns"`
 	Features         []string `json:"features"`
 }
 
@@ -69,6 +73,23 @@ func handleCreatePlan(c *gin.Context) {
 		intervalCount = 1
 	}
 
+	flows := req.Flows
+	if flows == 0 {
+		flows = -1
+	}
+	funnels := req.Funnels
+	if funnels == 0 {
+		funnels = -1
+	}
+	quickReplies := req.QuickReplies
+	if quickReplies == 0 {
+		quickReplies = -1
+	}
+	campaigns := req.Campaigns
+	if campaigns == 0 {
+		campaigns = -1
+	}
+
 	plan := models.PlanDef{
 		Name:             req.Name,
 		Label:            req.Label,
@@ -83,6 +104,10 @@ func handleCreatePlan(c *gin.Context) {
 		Sessions:         req.Sessions,
 		MessagesDay:      req.MessagesDay,
 		Agents:           req.Agents,
+		Flows:            flows,
+		Funnels:          funnels,
+		QuickReplies:     quickReplies,
+		Campaigns:        campaigns,
 		Features:         features.ToJSON(req.Features),
 		IsCustom:         true,
 		IsActive:         true,
@@ -111,6 +136,10 @@ type UpdatePlanRequest struct {
 	Sessions         *int      `json:"sessions"`
 	MessagesDay      *int      `json:"messages_day"`
 	Agents           *int      `json:"agents"`
+	Flows            *int      `json:"flows"`
+	Funnels          *int      `json:"funnels"`
+	QuickReplies     *int      `json:"quick_replies"`
+	Campaigns        *int      `json:"campaigns"`
 	IsActive         *bool     `json:"is_active"`
 	Features         *[]string `json:"features"`
 }
@@ -165,6 +194,18 @@ func handleUpdatePlan(c *gin.Context) {
 	}
 	if req.Agents != nil {
 		updates["agents"] = *req.Agents
+	}
+	if req.Flows != nil {
+		updates["flows"] = *req.Flows
+	}
+	if req.Funnels != nil {
+		updates["funnels"] = *req.Funnels
+	}
+	if req.QuickReplies != nil {
+		updates["quick_replies"] = *req.QuickReplies
+	}
+	if req.Campaigns != nil {
+		updates["campaigns"] = *req.Campaigns
 	}
 	if req.IsActive != nil {
 		updates["is_active"] = *req.IsActive

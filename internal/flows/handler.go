@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"whatify/backend/internal/activity"
+	"whatify/backend/internal/billing"
 	"whatify/backend/internal/middleware"
 	"whatify/backend/internal/models"
 	"whatify/backend/pkg/database"
@@ -72,6 +73,15 @@ func createFlow(c *gin.Context) {
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
+	}
+
+	// Check if creating this flow as active would exceed the plan limit.
+	isActive := input.IsActive == nil || *input.IsActive
+	if isActive {
+		if err := billing.CheckFlowLimit(tenantID); err != nil {
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			return
+		}
 	}
 
 	nodes := input.Nodes

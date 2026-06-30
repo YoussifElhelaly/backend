@@ -2,6 +2,7 @@ package quick_replies
 
 import (
 	"net/http"
+	"whatify/backend/internal/billing"
 	"whatify/backend/internal/middleware"
 	"whatify/backend/internal/models"
 	"whatify/backend/pkg/database"
@@ -37,6 +38,11 @@ func create(c *gin.Context) {
 	var input QuickReplyInput
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := billing.CheckQuickReplyLimit(tenantID); err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
 		return
 	}
 

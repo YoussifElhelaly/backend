@@ -227,6 +227,8 @@ func handleSendMedia(c *gin.Context) {
 	}
 	if msgType == models.MessageTypeAudio {
 		msg.Content = "Voice Message"
+	} else if caption != "" {
+		msg.Content = caption
 	}
 	if err := database.DB.Create(&msg).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save message"})

@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"log"
 	"net/http"
 	"time"
 	"whatify/backend/internal/middleware"
@@ -126,7 +127,9 @@ func handleForgotPassword(c *gin.Context) {
 		return
 	}
 	// Always return 200 to avoid leaking whether an email exists
-	forgotPassword(req.Email)
+	if err := forgotPassword(req.Email); err != nil {
+		log.Printf("[AUTH] forgot-password email error for %s: %v", req.Email, err)
+	}
 	c.JSON(http.StatusOK, gin.H{"message": "if that email is registered, a reset link has been sent"})
 }
 
