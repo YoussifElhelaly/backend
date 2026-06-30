@@ -735,3 +735,21 @@ func (p *PlanDef) BeforeCreate(tx *gorm.DB) error {
 	}
 	return nil
 }
+
+// ─── Leads (landing page form submissions) ────────────────────────────────────
+
+type Lead struct {
+	ID        uuid.UUID `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	Name      string    `gorm:"not null"                                       json:"name"`
+	Email     string    `gorm:"not null;index"                                 json:"email"`
+	Phone     string    `gorm:"default:''"                                     json:"phone"`
+	Source    string    `gorm:"default:'landing'"                              json:"source"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+func (l *Lead) BeforeCreate(tx *gorm.DB) error {
+	if l.ID == uuid.Nil {
+		l.ID = uuid.New()
+	}
+	return nil
+}

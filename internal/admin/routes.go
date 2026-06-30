@@ -36,5 +36,9 @@ func RegisterRoutes(r *gin.RouterGroup) {
 		admin.POST("/plans", handleCreatePlan)
 		admin.PUT("/plans/:id", handleUpdatePlan)
 		admin.DELETE("/plans/:id", handleDeletePlan)
+
+		// Leads
+		admin.GET("/leads", handleListLeads)
+		admin.DELETE("/leads/:id", handleDeleteLead)
 	}
 }

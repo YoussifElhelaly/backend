@@ -822,3 +822,42 @@ func handleBulkPlanChange(c *gin.Context) {
 		"updated_count": result.RowsAffected,
 	})
 }
+
+// ─── Leads ────────────────────────────────────────────────────────────────────
+
+func handleListLeads(c *gin.Context) {
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 || limit > 200 {
+		limit = 50
+	}
+	offset := (page - 1) * limit
+
+	var leads []models.Lead
+	var total int64
+	database.DB.Model(&models.Lead{}).Count(&total)
+	database.DB.Order("created_at DESC").Limit(limit).Offset(offset).Find(&leads)
+
+	c.JSON(http.StatusOK, gin.H{
+		"leads": leads,
+		"total": total,
+		"page":  page,
+		"limit": limit,
+	})
+}
+
+func handleDeleteLead(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	if err := database.DB.Delete(&models.Lead{}, "id = ?", id).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}

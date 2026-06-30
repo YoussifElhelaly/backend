@@ -72,6 +72,7 @@ func Connect() {
 			&models.EmailVerificationToken{},
 			&models.RefreshToken{},
 			&models.AIConfig{},
+			&models.Lead{},
 		); err != nil {
 			log.Fatalf("failed to run migrations: %v", err)
 		}

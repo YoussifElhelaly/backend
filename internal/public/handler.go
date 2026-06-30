@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"whatify/backend/internal/models"
 	"whatify/backend/pkg/database"
 
@@ -76,13 +77,46 @@ func listPlans(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
+func submitLead(c *gin.Context) {
+	c.Header("Access-Control-Allow-Origin", "*")
+	var body struct {
+		Name  string `json:"name"  binding:"required"`
+		Email string `json:"email" binding:"required"`
+		Phone string `json:"phone"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Name and email are required"})
+		return
+	}
+	body.Email = strings.ToLower(strings.TrimSpace(body.Email))
+	body.Name = strings.TrimSpace(body.Name)
+
+	lead := models.Lead{
+		Name:   body.Name,
+		Email:  body.Email,
+		Phone:  strings.TrimSpace(body.Phone),
+		Source: "landing",
+	}
+	if err := database.DB.Create(&lead).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save"})
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"ok": true})
+}
+
 func RegisterRoutes(r gin.IRouter) {
 	pub := r.Group("/public")
-	pub.OPTIONS("/plans", func(c *gin.Context) {
+	corsMiddleware := func(c *gin.Context) {
 		c.Header("Access-Control-Allow-Origin", "*")
-		c.Header("Access-Control-Allow-Methods", "GET,OPTIONS")
+		c.Header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
 		c.Header("Access-Control-Allow-Headers", "Content-Type")
-		c.AbortWithStatus(204)
-	})
+		if c.Request.Method == "OPTIONS" {
+			c.AbortWithStatus(204)
+			return
+		}
+		c.Next()
+	}
+	pub.Use(corsMiddleware)
 	pub.GET("/plans", listPlans)
+	pub.POST("/leads", submitLead)
 }
