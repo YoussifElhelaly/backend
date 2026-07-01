@@ -4,7 +4,6 @@ import (
 	"net/http"
 	"strconv"
 	"time"
-	"whatify/backend/internal/billing"
 	"whatify/backend/internal/features"
 	"whatify/backend/internal/models"
 	"whatify/backend/pkg/database"
@@ -17,7 +16,7 @@ import (
 
 func handleListPlans(c *gin.Context) {
 	var plans []models.PlanDef
-	if err := database.DB.Order("price_usd asc").Find(&plans).Error; err != nil {
+	if err := database.DB.Order("price_egp asc").Find(&plans).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -27,8 +26,8 @@ func handleListPlans(c *gin.Context) {
 type CreatePlanRequest struct {
 	Name             string   `json:"name"          binding:"required"`
 	Label            string   `json:"label"         binding:"required"`
-	PriceUSD         float64  `json:"price_usd"     binding:"required,min=0"`
-	OriginalPriceUSD float64  `json:"original_price_usd"`
+	PriceEGP         float64  `json:"price_egp"     binding:"required,min=0"`
+	OriginalPriceEGP float64  `json:"original_price_egp"`
 	Period           string   `json:"period"`
 	IntervalCount    int      `json:"interval_count"`
 	Desc             string   `json:"desc"`
@@ -93,8 +92,8 @@ func handleCreatePlan(c *gin.Context) {
 	plan := models.PlanDef{
 		Name:             req.Name,
 		Label:            req.Label,
-		PriceUSD:         req.PriceUSD,
-		OriginalPriceUSD: req.OriginalPriceUSD,
+		PriceEGP:         req.PriceEGP,
+		OriginalPriceEGP: req.OriginalPriceEGP,
 		Period:           period,
 		IntervalCount:    intervalCount,
 		Desc:             req.Desc,
@@ -117,16 +116,13 @@ func handleCreatePlan(c *gin.Context) {
 		return
 	}
 
-	// Trigger PayPal plan creation for the new custom plan in the background
-	go billing.SetupPayPalPlans()
-
 	c.JSON(http.StatusCreated, plan)
 }
 
 type UpdatePlanRequest struct {
 	Label            *string   `json:"label"`
-	PriceUSD         *float64  `json:"price_usd"`
-	OriginalPriceUSD *float64  `json:"original_price_usd"`
+	PriceEGP         *float64  `json:"price_egp"`
+	OriginalPriceEGP *float64  `json:"original_price_egp"`
 	Period           *string   `json:"period"`
 	IntervalCount    *int      `json:"interval_count"`
 	Desc             *string   `json:"desc"`
@@ -162,11 +158,11 @@ func handleUpdatePlan(c *gin.Context) {
 	if req.Label != nil {
 		updates["label"] = *req.Label
 	}
-	if req.PriceUSD != nil {
-		updates["price_usd"] = *req.PriceUSD
+	if req.PriceEGP != nil {
+		updates["price_egp"] = *req.PriceEGP
 	}
-	if req.OriginalPriceUSD != nil {
-		updates["original_price_usd"] = *req.OriginalPriceUSD
+	if req.OriginalPriceEGP != nil {
+		updates["original_price_egp"] = *req.OriginalPriceEGP
 	}
 	if req.Period != nil {
 		updates["period"] = *req.Period
@@ -219,9 +215,6 @@ func handleUpdatePlan(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		
-		// Synchronize plans with PayPal in the background so changes take effect immediately
-		go billing.SetupPayPalPlans()
 	}
 
 	database.DB.First(&plan, "id = ?", id)
@@ -306,9 +299,9 @@ func handleListAllSubscriptions(c *gin.Context) {
 }
 
 type UpdateSubscriptionRequest struct {
-	Status   string     `json:"status"`
+	Status    string     `json:"status"`
 	ExpiresAt *time.Time `json:"expires_at"`
-	Amount   *float64   `json:"amount"`
+	Amount    *float64   `json:"amount"`
 }
 
 func handleUpdateSubscription(c *gin.Context) {
@@ -370,7 +363,7 @@ func handleCancelSubscription(c *gin.Context) {
 
 	// Also update tenant plan status
 	database.DB.Model(&models.Tenant{}).Where("id = ?", sub.TenantID).Updates(map[string]interface{}{
-		"paypal_sub_id": "",
+		"paytabs_token": "",
 	})
 
 	c.JSON(http.StatusOK, gin.H{"message": "subscription cancelled", "status": "CANCELLED"})

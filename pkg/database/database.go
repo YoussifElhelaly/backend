@@ -44,6 +44,13 @@ func Connect() {
 	// Set DISABLE_AUTO_MIGRATE=true in production to skip GORM schema sync on
 	// startup — run migrations manually with a dedicated migration tool instead.
 	if os.Getenv("DISABLE_AUTO_MIGRATE") != "true" {
+		// PayPal → PayTabs migration: rename old columns instead of leaving them
+		// orphaned (GORM's AutoMigrate only adds new columns, it never renames).
+		renameColumnIfExists(db, &models.Tenant{}, "paypal_sub_id", "paytabs_token")
+		renameColumnIfExists(db, &models.Subscription{}, "paypal_sub_id", "paytabs_tran_ref")
+		renameColumnIfExists(db, &models.PlanDef{}, "price_usd", "price_egp")
+		renameColumnIfExists(db, &models.PlanDef{}, "original_price_usd", "original_price_egp")
+
 		if err := db.AutoMigrate(
 			&models.Tenant{},
 			&models.User{},
@@ -108,4 +115,19 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// renameColumnIfExists renames oldName to newName on the table backing model,
+// but only when the table already exists, the old column is present, and the
+// new one isn't (idempotent — safe to call on every startup).
+func renameColumnIfExists(db *gorm.DB, model interface{}, oldName, newName string) {
+	m := db.Migrator()
+	if !m.HasTable(model) || !m.HasColumn(model, oldName) || m.HasColumn(model, newName) {
+		return
+	}
+	if err := m.RenameColumn(model, oldName, newName); err != nil {
+		log.Printf("database: failed to rename column %s -> %s: %v", oldName, newName, err)
+	} else {
+		log.Printf("database: renamed column %s -> %s", oldName, newName)
+	}
 }

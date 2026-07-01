@@ -18,14 +18,14 @@ type PlanLimits struct {
 	Funnels      int // -1 = unlimited (active funnels)
 	QuickReplies int // -1 = unlimited (total)
 	Campaigns    int // -1 = unlimited (total non-deleted)
-	PriceUSD     float64
+	PriceEGP     float64
 	Label        string
 }
 
 var PlanDefs = map[models.Plan]PlanLimits{
-	models.PlanStarter: {Sessions: 1, MessagesDay: 500, Agents: 2, Flows: 2, Funnels: 1, QuickReplies: 10, Campaigns: 5, PriceUSD: 19, Label: "Starter"},
-	models.PlanGrowth:  {Sessions: 5, MessagesDay: 5000, Agents: 10, Flows: 10, Funnels: 5, QuickReplies: 50, Campaigns: -1, PriceUSD: 49, Label: "Growth"},
-	models.PlanScale:   {Sessions: 20, MessagesDay: -1, Agents: -1, Flows: -1, Funnels: -1, QuickReplies: -1, Campaigns: -1, PriceUSD: 99, Label: "Scale"},
+	models.PlanStarter: {Sessions: 1, MessagesDay: 500, Agents: 2, Flows: 2, Funnels: 1, QuickReplies: 10, Campaigns: 5, PriceEGP: 599, Label: "Starter"},
+	models.PlanGrowth:  {Sessions: 5, MessagesDay: 5000, Agents: 10, Flows: 10, Funnels: 5, QuickReplies: 50, Campaigns: -1, PriceEGP: 1499, Label: "Growth"},
+	models.PlanScale:   {Sessions: 20, MessagesDay: -1, Agents: -1, Flows: -1, Funnels: -1, QuickReplies: -1, Campaigns: -1, PriceEGP: 2999, Label: "Scale"},
 }
 
 func GetLimits(plan models.Plan) PlanLimits {
@@ -40,7 +40,7 @@ func GetLimits(plan models.Plan) PlanLimits {
 			Funnels:      planDef.Funnels,
 			QuickReplies: planDef.QuickReplies,
 			Campaigns:    planDef.Campaigns,
-			PriceUSD:     planDef.PriceUSD,
+			PriceEGP:     planDef.PriceEGP,
 			Label:        planDef.Label,
 		}
 	}

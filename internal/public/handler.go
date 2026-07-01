@@ -15,8 +15,8 @@ type PlanResponse struct {
 	ID               string   `json:"id"`
 	Name             string   `json:"name"`
 	Label            string   `json:"label"`
-	PriceUSD         float64  `json:"price_usd"`
-	OriginalPriceUSD float64  `json:"original_price_usd"`
+	PriceEGP         float64  `json:"price_egp"`
+	OriginalPriceEGP float64  `json:"original_price_egp"`
 	IntervalCount    int      `json:"interval_count"`
 	PriceStr         string   `json:"price"`
 	Period           string   `json:"period"`
@@ -54,10 +54,10 @@ func listPlans(c *gin.Context) {
 			ID:               p.ID.String(),
 			Name:             p.Name,
 			Label:            p.Label,
-			PriceUSD:         p.PriceUSD,
-			OriginalPriceUSD: p.OriginalPriceUSD,
+			PriceEGP:         p.PriceEGP,
+			OriginalPriceEGP: p.OriginalPriceEGP,
 			IntervalCount:    p.IntervalCount,
-			PriceStr:         fmt.Sprintf("$%.0f", p.PriceUSD),
+			PriceStr:         fmt.Sprintf("EGP %.0f", p.PriceEGP),
 			Period:           p.Period,
 			Desc:             p.Desc,
 			Badge:            p.Badge,

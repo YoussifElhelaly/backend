@@ -64,7 +64,7 @@ func Auth() gin.HandlerFunc {
 func checkTenantAccess(tenantID uuid.UUID) (bool, string, string) {
 	var tenant models.Tenant
 	if err := database.DB.
-		Select("id, is_suspended, plan, plan_expires_at, trial_ends_at, paypal_sub_id").
+		Select("id, is_suspended, plan, plan_expires_at, trial_ends_at, paytabs_token").
 		First(&tenant, "id = ?", tenantID).Error; err != nil {
 		// Fail closed — deny access on infrastructure errors to prevent
 		// bypassing suspension/trial checks when the DB is temporarily down.
@@ -74,8 +74,8 @@ func checkTenantAccess(tenantID uuid.UUID) (bool, string, string) {
 		return true, "account_suspended", "account suspended — contact support"
 	}
 	// Paid subscription expired → auto-downgrade to STARTER (don't hard-block).
-	// We only downgrade when there's no active PayPal sub (cancelled / not renewed).
-	if tenant.PlanExpiresAt != nil && time.Now().After(*tenant.PlanExpiresAt) && tenant.PaypalSubID == "" {
+	// We only downgrade when there's no stored card token (cancelled / not renewed).
+	if tenant.PlanExpiresAt != nil && time.Now().After(*tenant.PlanExpiresAt) && tenant.PaytabsToken == "" {
 		if tenant.Plan != models.PlanStarter {
 			database.DB.Model(&models.Tenant{}).Where("id = ?", tenantID).Updates(map[string]interface{}{
 				"plan":            models.PlanStarter,
@@ -88,7 +88,7 @@ func checkTenantAccess(tenantID uuid.UUID) (bool, string, string) {
 	// Trial expired and never paid (plan_expires_at nil = never had a subscription)
 	if tenant.TrialEndsAt != nil &&
 		time.Now().After(*tenant.TrialEndsAt) &&
-		tenant.PaypalSubID == "" &&
+		tenant.PaytabsToken == "" &&
 		tenant.PlanExpiresAt == nil {
 		return true, "trial_expired", "your 3-day free trial has ended — subscribe to continue"
 	}

@@ -29,7 +29,7 @@ type Tenant struct {
 	PlanExpiresAt     *time.Time     `json:"plan_expires_at,omitempty"`
 	TrialEndsAt       *time.Time     `json:"trial_ends_at,omitempty"`
 	IsSuspended       bool           `gorm:"default:false"                                  json:"is_suspended"`
-	PaypalSubID       string         `gorm:"default:''"                                     json:"paypal_sub_id,omitempty"`
+	PaytabsToken      string         `gorm:"default:''"                                     json:"-"`
 	CampaignDelayMin  int            `gorm:"default:3"                                      json:"campaign_delay_min"`
 	CampaignDelayMax  int            `gorm:"default:8"                                      json:"campaign_delay_max"`
 	DailyMessageLimit int            `gorm:"default:25"                                     json:"daily_message_limit"`
@@ -56,24 +56,24 @@ type User struct {
 type SessionStatus string
 
 const (
-	StatusConnecting    SessionStatus = "CONNECTING"
-	StatusConnected     SessionStatus = "CONNECTED"
-	StatusDisconnected  SessionStatus = "DISCONNECTED"
-	StatusBanned        SessionStatus = "BANNED"
+	StatusConnecting   SessionStatus = "CONNECTING"
+	StatusConnected    SessionStatus = "CONNECTED"
+	StatusDisconnected SessionStatus = "DISCONNECTED"
+	StatusBanned       SessionStatus = "BANNED"
 )
 
 type WhatsAppSession struct {
-	ID          uuid.UUID      `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
-	TenantID    uuid.UUID      `gorm:"type:uuid;not null"                             json:"tenant_id"`
-	Tenant      Tenant         `gorm:"foreignKey:TenantID"                            json:"-"`
-	Phone       string         `gorm:"default:''"                                     json:"phone"`
-	Status      SessionStatus  `gorm:"not null;default:'DISCONNECTED'"               json:"status"`
-	DailyCount  int            `gorm:"default:0"                                     json:"daily_count"`
-	ProxyURL    string         `gorm:"default:''"                                    json:"proxy_url,omitempty"`
-	LastActive  *time.Time     `json:"last_active,omitempty"`
-	CreatedAt   time.Time      `json:"created_at"`
-	UpdatedAt   time.Time      `json:"updated_at"`
-	DeletedAt   gorm.DeletedAt `gorm:"index"                                         json:"-"`
+	ID         uuid.UUID      `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	TenantID   uuid.UUID      `gorm:"type:uuid;not null"                             json:"tenant_id"`
+	Tenant     Tenant         `gorm:"foreignKey:TenantID"                            json:"-"`
+	Phone      string         `gorm:"default:''"                                     json:"phone"`
+	Status     SessionStatus  `gorm:"not null;default:'DISCONNECTED'"               json:"status"`
+	DailyCount int            `gorm:"default:0"                                     json:"daily_count"`
+	ProxyURL   string         `gorm:"default:''"                                    json:"proxy_url,omitempty"`
+	LastActive *time.Time     `json:"last_active,omitempty"`
+	CreatedAt  time.Time      `json:"created_at"`
+	UpdatedAt  time.Time      `json:"updated_at"`
+	DeletedAt  gorm.DeletedAt `gorm:"index"                                         json:"-"`
 }
 
 type MessageType string
@@ -336,37 +336,37 @@ const (
 )
 
 type Funnel struct {
-	ID               uuid.UUID          `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
-	TenantID         uuid.UUID          `gorm:"type:uuid;not null;index"                       json:"tenant_id"`
-	SessionPhone     string             `gorm:"not null"                                       json:"session_phone"`
-	Name             string             `gorm:"not null"                                       json:"name"`
-	Description      string             `gorm:"default:''"                                     json:"description,omitempty"`
-	Status           FunnelStatus       `gorm:"not null;default:'DRAFT'"                       json:"status"`
-	ReplyWindowHours int                `gorm:"default:48"                                     json:"reply_window_hours"`
+	ID               uuid.UUID           `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	TenantID         uuid.UUID           `gorm:"type:uuid;not null;index"                       json:"tenant_id"`
+	SessionPhone     string              `gorm:"not null"                                       json:"session_phone"`
+	Name             string              `gorm:"not null"                                       json:"name"`
+	Description      string              `gorm:"default:''"                                     json:"description,omitempty"`
+	Status           FunnelStatus        `gorm:"not null;default:'DRAFT'"                       json:"status"`
+	ReplyWindowHours int                 `gorm:"default:48"                                     json:"reply_window_hours"`
 	TimeoutAction    FunnelTimeoutAction `gorm:"not null;default:'NONE'"                       json:"timeout_action"`
-	FollowUpMessage  string             `gorm:"type:text;default:''"                           json:"follow_up_message,omitempty"`
-	Steps            []FunnelStep       `gorm:"foreignKey:FunnelID"                            json:"steps,omitempty"`
-	ContactCount     int                `gorm:"-"                                              json:"contact_count,omitempty"`
-	CreatedAt        time.Time          `json:"created_at"`
-	UpdatedAt        time.Time          `json:"updated_at"`
-	DeletedAt        gorm.DeletedAt     `gorm:"index"                                          json:"-"`
+	FollowUpMessage  string              `gorm:"type:text;default:''"                           json:"follow_up_message,omitempty"`
+	Steps            []FunnelStep        `gorm:"foreignKey:FunnelID"                            json:"steps,omitempty"`
+	ContactCount     int                 `gorm:"-"                                              json:"contact_count,omitempty"`
+	CreatedAt        time.Time           `json:"created_at"`
+	UpdatedAt        time.Time           `json:"updated_at"`
+	DeletedAt        gorm.DeletedAt      `gorm:"index"                                          json:"-"`
 }
 
 type FunnelStep struct {
-	ID        uuid.UUID      `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
-	FunnelID  uuid.UUID      `gorm:"type:uuid;not null;index"                       json:"funnel_id"`
-	Order        int            `gorm:"not null"                                    json:"order"`
-	Name         string         `gorm:"not null"                                    json:"name"`
-	Type         FunnelStepType `gorm:"not null"                                    json:"type"`
-	Message      string         `gorm:"type:text;default:''"                        json:"message,omitempty"`
-	Variants     string         `gorm:"type:text;default:'[]'"                      json:"variants"` // JSON []string
-	MediaPayload []byte         `gorm:"type:bytea"                                  json:"-"`
-	MediaMime    string         `gorm:"default:''"                                  json:"media_mime,omitempty"`
-	MediaName    string         `gorm:"default:''"                                  json:"media_name,omitempty"`
-	DelayHours       int        `gorm:"not null;default:0"                          json:"delay_hours"`
-	DelayFromStepID  *uuid.UUID `gorm:"type:uuid"                                   json:"delay_from_step_id,omitempty"`
-	CreatedAt    time.Time      `json:"created_at"`
-	DeletedAt    gorm.DeletedAt `gorm:"index"                                       json:"-"`
+	ID              uuid.UUID      `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	FunnelID        uuid.UUID      `gorm:"type:uuid;not null;index"                       json:"funnel_id"`
+	Order           int            `gorm:"not null"                                    json:"order"`
+	Name            string         `gorm:"not null"                                    json:"name"`
+	Type            FunnelStepType `gorm:"not null"                                    json:"type"`
+	Message         string         `gorm:"type:text;default:''"                        json:"message,omitempty"`
+	Variants        string         `gorm:"type:text;default:'[]'"                      json:"variants"` // JSON []string
+	MediaPayload    []byte         `gorm:"type:bytea"                                  json:"-"`
+	MediaMime       string         `gorm:"default:''"                                  json:"media_mime,omitempty"`
+	MediaName       string         `gorm:"default:''"                                  json:"media_name,omitempty"`
+	DelayHours      int            `gorm:"not null;default:0"                          json:"delay_hours"`
+	DelayFromStepID *uuid.UUID     `gorm:"type:uuid"                                   json:"delay_from_step_id,omitempty"`
+	CreatedAt       time.Time      `json:"created_at"`
+	DeletedAt       gorm.DeletedAt `gorm:"index"                                       json:"-"`
 }
 
 type FunnelContact struct {
@@ -384,16 +384,16 @@ type FunnelContact struct {
 }
 
 type FunnelContactHistory struct {
-	ID         uuid.UUID  `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
-	FunnelID   uuid.UUID  `gorm:"type:uuid;not null;index"                       json:"funnel_id"`
-	ContactID  uuid.UUID  `gorm:"type:uuid;not null"                             json:"contact_id"`
-	FromStepID *uuid.UUID `gorm:"type:uuid"                                      json:"from_step_id,omitempty"`
+	ID         uuid.UUID   `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	FunnelID   uuid.UUID   `gorm:"type:uuid;not null;index"                       json:"funnel_id"`
+	ContactID  uuid.UUID   `gorm:"type:uuid;not null"                             json:"contact_id"`
+	FromStepID *uuid.UUID  `gorm:"type:uuid"                                      json:"from_step_id,omitempty"`
 	FromStep   *FunnelStep `gorm:"foreignKey:FromStepID"                         json:"from_step,omitempty"`
-	ToStepID   uuid.UUID  `gorm:"type:uuid;not null"                             json:"to_step_id"`
-	ToStep     FunnelStep `gorm:"foreignKey:ToStepID"                            json:"to_step"`
-	Trigger    string     `gorm:"not null;default:'MANUAL'"                      json:"trigger"`
-	MovedBy    *uuid.UUID `gorm:"type:uuid"                                      json:"moved_by,omitempty"`
-	CreatedAt  time.Time  `json:"created_at"`
+	ToStepID   uuid.UUID   `gorm:"type:uuid;not null"                             json:"to_step_id"`
+	ToStep     FunnelStep  `gorm:"foreignKey:ToStepID"                            json:"to_step"`
+	Trigger    string      `gorm:"not null;default:'MANUAL'"                      json:"trigger"`
+	MovedBy    *uuid.UUID  `gorm:"type:uuid"                                      json:"moved_by,omitempty"`
+	CreatedAt  time.Time   `json:"created_at"`
 }
 
 func (f *Funnel) BeforeCreate(tx *gorm.DB) error {
@@ -429,9 +429,9 @@ func (fh *FunnelContactHistory) BeforeCreate(tx *gorm.DB) error {
 type FlowTrigger string
 
 const (
-	FlowTriggerAnyMessage  FlowTrigger = "any_message"
-	FlowTriggerKeyword     FlowTrigger = "keyword"
-	FlowTriggerNewContact  FlowTrigger = "new_contact"
+	FlowTriggerAnyMessage FlowTrigger = "any_message"
+	FlowTriggerKeyword    FlowTrigger = "keyword"
+	FlowTriggerNewContact FlowTrigger = "new_contact"
 )
 
 type Flow struct {
@@ -471,7 +471,7 @@ type FlowRun struct {
 	ContactName  string     `gorm:"-"                                                json:"contact_name"`
 	ContactPhone string     `gorm:"-"                                                json:"contact_phone"`
 	TriggerMsg   string     `gorm:"column:trigger_message;type:text"                 json:"trigger_message"`
-	Status       string     `gorm:"not null;default:'completed'"                     json:"status"` // completed | failed | partial
+	Status       string     `gorm:"not null;default:'completed'"                     json:"status"`  // completed | failed | partial
 	Actions      string     `gorm:"type:text;default:'[]'"                           json:"actions"` // JSON [{type,detail,status,error}]
 	ExecutedAt   time.Time  `gorm:"not null;index"                                   json:"executed_at"`
 	CreatedAt    time.Time  `json:"created_at"`
@@ -641,27 +641,28 @@ func (t *RefreshToken) BeforeCreate(tx *gorm.DB) error {
 type SubscriptionStatus string
 
 const (
-	SubStatusPending   SubscriptionStatus = "PENDING"    // awaiting PayPal approval
-	SubStatusActive    SubscriptionStatus = "ACTIVE"     // recurring subscription live
-	SubStatusCancelled SubscriptionStatus = "CANCELLED"  // user or PayPal cancelled
-	SubStatusFailed    SubscriptionStatus = "FAILED"     // payment failed
+	SubStatusPending   SubscriptionStatus = "PENDING"   // awaiting PayTabs confirmation
+	SubStatusActive    SubscriptionStatus = "ACTIVE"    // recurring subscription live
+	SubStatusCancelled SubscriptionStatus = "CANCELLED" // user or gateway cancelled
+	SubStatusFailed    SubscriptionStatus = "FAILED"    // payment failed
 	// legacy — kept for backwards-compat with old one-time payment records
 	SubStatusPaid SubscriptionStatus = "PAID"
 )
 
 type Subscription struct {
-	ID          uuid.UUID          `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
-	TenantID    uuid.UUID          `gorm:"type:uuid;not null;index"                       json:"tenant_id"`
-	Plan        Plan               `gorm:"not null"                                       json:"plan"`
-	Amount      float64            `gorm:"not null"                                       json:"amount"`
-	Currency    string             `gorm:"not null;default:'USD'"                         json:"currency"`
-	CartID      string             `gorm:"not null;uniqueIndex"                           json:"cart_id"`
-	PaypalSubID string             `gorm:"default:'';index"                               json:"paypal_sub_id,omitempty"`
-	Status      SubscriptionStatus `gorm:"not null;default:'PENDING'"                     json:"status"`
-	PaidAt      *time.Time         `json:"paid_at,omitempty"`
-	ExpiresAt   *time.Time         `json:"expires_at,omitempty"`
-	CreatedAt   time.Time          `json:"created_at"`
-	UpdatedAt   time.Time          `json:"updated_at"`
+	ID             uuid.UUID          `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	TenantID       uuid.UUID          `gorm:"type:uuid;not null;index"                       json:"tenant_id"`
+	Plan           Plan               `gorm:"not null"                                       json:"plan"`
+	Amount         float64            `gorm:"not null"                                       json:"amount"`
+	Currency       string             `gorm:"not null;default:'EGP'"                         json:"currency"`
+	CartID         string             `gorm:"not null;uniqueIndex"                           json:"cart_id"`
+	PaytabsTranRef string             `gorm:"default:'';index"                               json:"paytabs_tran_ref,omitempty"`
+	PaytabsToken   string             `gorm:"default:''"                                     json:"-"`
+	Status         SubscriptionStatus `gorm:"not null;default:'PENDING'"                     json:"status"`
+	PaidAt         *time.Time         `json:"paid_at,omitempty"`
+	ExpiresAt      *time.Time         `json:"expires_at,omitempty"`
+	CreatedAt      time.Time          `json:"created_at"`
+	UpdatedAt      time.Time          `json:"updated_at"`
 }
 
 func (s *Subscription) BeforeCreate(tx *gorm.DB) error {
@@ -672,7 +673,7 @@ func (s *Subscription) BeforeCreate(tx *gorm.DB) error {
 }
 
 // PlatformSetting is a simple key-value store for platform-wide configuration
-// (e.g. PayPal plan IDs) that must persist across server restarts.
+// that must persist across server restarts.
 type PlatformSetting struct {
 	Key       string    `gorm:"primaryKey"    json:"key"`
 	Value     string    `gorm:"not null"      json:"value"`
@@ -707,8 +708,8 @@ type PlanDef struct {
 	ID               uuid.UUID `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
 	Name             string    `gorm:"not null;uniqueIndex"                          json:"name"`
 	Label            string    `gorm:"not null"                                      json:"label"`
-	PriceUSD         float64   `gorm:"not null"                                      json:"price_usd"`
-	OriginalPriceUSD float64   `gorm:"not null;default:0"                            json:"original_price_usd"`
+	PriceEGP         float64   `gorm:"not null"                                      json:"price_egp"`
+	OriginalPriceEGP float64   `gorm:"not null;default:0"                            json:"original_price_egp"`
 	Period           string    `gorm:"not null;default:'mo'"                         json:"period"`
 	IntervalCount    int       `gorm:"not null;default:1"                            json:"interval_count"`
 	Desc             string    `gorm:"type:text;default:''"                          json:"desc"`

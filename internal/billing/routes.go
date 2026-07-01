@@ -7,7 +7,7 @@ import (
 )
 
 func RegisterRoutes(r *gin.RouterGroup) {
-	// PayPal POSTs here on subscription events — no auth
+	// PayTabs POSTs here on transaction events (IPN) — no auth, HMAC-verified
 	r.POST("/billing/webhook", handleWebhook)
 
 	// GET/checkout/activate bypass tenant-access check so trial-expired or

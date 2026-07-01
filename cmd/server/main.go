@@ -11,6 +11,7 @@ import (
 	"time"
 	"whatify/backend/internal/activity"
 	"whatify/backend/internal/admin"
+	"whatify/backend/internal/ai"
 	"whatify/backend/internal/analytics"
 	"whatify/backend/internal/auth"
 	"whatify/backend/internal/billing"
@@ -20,15 +21,14 @@ import (
 	"whatify/backend/internal/flows"
 	"whatify/backend/internal/funnels"
 	"whatify/backend/internal/inbox"
-	"whatify/backend/internal/products"
-	quickreplies "whatify/backend/internal/quick_replies"
-	"whatify/backend/internal/settings"
-	"whatify/backend/internal/models"
-	"whatify/backend/internal/session"
-	"whatify/backend/internal/tags"
-	"whatify/backend/internal/ai"
-	"whatify/backend/internal/public"
 	"whatify/backend/internal/middleware"
+	"whatify/backend/internal/models"
+	"whatify/backend/internal/products"
+	"whatify/backend/internal/public"
+	quickreplies "whatify/backend/internal/quick_replies"
+	"whatify/backend/internal/session"
+	"whatify/backend/internal/settings"
+	"whatify/backend/internal/tags"
 	"whatify/backend/pkg/database"
 	"whatify/backend/pkg/jwtutil"
 	"whatify/backend/pkg/whatsapp"
@@ -242,9 +242,9 @@ func main() {
 	developer.RegisterRoutes(v1)
 	billing.RegisterRoutes(v1)
 	public.RegisterRoutes(v1)
-	billing.SetupPayPalPlans()
 	billing.SeedBuiltinPlans()
 	billing.FixTrialDates()
+	billing.StartRenewalWorker(ctx)
 	funnels.StartTimeoutWorker(ctx)
 	funnels.StartTimedAdvanceWorker(ctx)
 

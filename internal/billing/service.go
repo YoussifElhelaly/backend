@@ -16,7 +16,7 @@ import (
 // a paid subscription. Runs at startup to repair bad existing data.
 func FixTrialDates() {
 	res := database.DB.Model(&models.Tenant{}).
-		Where("trial_ends_at IS NOT NULL AND (paypal_sub_id != '' OR plan_expires_at IS NOT NULL)").
+		Where("trial_ends_at IS NOT NULL AND (paytabs_token != '' OR plan_expires_at IS NOT NULL)").
 		Update("trial_ends_at", nil)
 	if res.RowsAffected > 0 {
 		log.Printf("billing: cleared stale trial_ends_at on %d tenant(s)", res.RowsAffected)
@@ -26,11 +26,11 @@ func FixTrialDates() {
 // SeedBuiltinPlans ensures the 3 built-in plans exist in the plan_defs table.
 func SeedBuiltinPlans() {
 	builtin := []models.PlanDef{
-		{Name: "STARTER", Label: "Starter", PriceUSD: 19, Sessions: 1, MessagesDay: 500, Agents: 2, Flows: 2, Funnels: 1, QuickReplies: 10, Campaigns: 5, IsCustom: false, IsActive: true,
+		{Name: "STARTER", Label: "Starter", PriceEGP: 599, Sessions: 1, MessagesDay: 500, Agents: 2, Flows: 2, Funnels: 1, QuickReplies: 10, Campaigns: 5, IsCustom: false, IsActive: true,
 			Features: features.ToJSON(features.DefaultFeatures[models.PlanStarter])},
-		{Name: "GROWTH", Label: "Growth", PriceUSD: 49, Sessions: 5, MessagesDay: 5000, Agents: 10, Flows: 10, Funnels: 5, QuickReplies: 50, Campaigns: -1, IsCustom: false, IsActive: true,
+		{Name: "GROWTH", Label: "Growth", PriceEGP: 1499, Sessions: 5, MessagesDay: 5000, Agents: 10, Flows: 10, Funnels: 5, QuickReplies: 50, Campaigns: -1, IsCustom: false, IsActive: true,
 			Features: features.ToJSON(features.DefaultFeatures[models.PlanGrowth])},
-		{Name: "SCALE", Label: "Scale", PriceUSD: 99, Sessions: 20, MessagesDay: -1, Agents: -1, Flows: -1, Funnels: -1, QuickReplies: -1, Campaigns: -1, IsCustom: false, IsActive: true,
+		{Name: "SCALE", Label: "Scale", PriceEGP: 2999, Sessions: 20, MessagesDay: -1, Agents: -1, Flows: -1, Funnels: -1, QuickReplies: -1, Campaigns: -1, IsCustom: false, IsActive: true,
 			Features: features.ToJSON(features.DefaultFeatures[models.PlanScale])},
 	}
 	for _, p := range builtin {
@@ -53,12 +53,21 @@ func SeedBuiltinPlans() {
 }
 
 type CheckoutResult struct {
-	ApproveURL     string `json:"approve_url"`
-	SubscriptionID string `json:"subscription_id"`
+	RedirectURL string `json:"redirect_url"`
+	TranRef     string `json:"tran_ref"`
 }
 
-// Checkout creates a PayPal subscription and returns the approval URL.
+// Checkout creates a PayTabs hosted-payment-page request and returns the
+// redirect URL to send the user to, tokenising the card for future renewals.
 func Checkout(tenantID uuid.UUID, plan models.Plan) (*CheckoutResult, error) {
+	var tenant models.Tenant
+	if err := database.DB.First(&tenant, "id = ?", tenantID).Error; err != nil {
+		return nil, fmt.Errorf("tenant not found: %w", err)
+	}
+
+	var owner models.User
+	database.DB.Where("tenant_id = ? AND role = ?", tenantID, models.RoleAdmin).First(&owner)
+
 	limits := GetLimits(plan)
 
 	frontendURL := os.Getenv("FRONTEND_URL")
@@ -66,55 +75,63 @@ func Checkout(tenantID uuid.UUID, plan models.Plan) (*CheckoutResult, error) {
 		frontendURL = "http://localhost:5173"
 	}
 	returnURL := frontendURL + "/billing/callback"
-	cancelURL := frontendURL + "/settings?tab=billing&cancelled=1"
+	callbackURL := os.Getenv("BACKEND_URL")
+	if callbackURL == "" {
+		callbackURL = "http://localhost:8080"
+	}
+	callbackURL += "/api/v1/billing/webhook"
 
-	ppSubID, approveURL, err := CreateSubscription(
-		plan,
-		tenantID.String(),
+	cartID := "wf_" + tenantID.String() + "_" + uuid.New().String()
+
+	tx, err := CreatePaymentRequest(
+		&tenant,
+		customerDetails{tenant: &tenant, name: owner.Name, email: owner.Email},
+		fmt.Sprintf("Whatify %s subscription", limits.Label),
+		limits.PriceEGP,
+		cartID,
 		returnURL,
-		cancelURL,
+		callbackURL,
 	)
 	if err != nil {
-		log.Printf("billing: CreateSubscription failed for tenant %s plan %s: %v", tenantID, plan, err)
+		log.Printf("billing: CreatePaymentRequest failed for tenant %s plan %s: %v", tenantID, plan, err)
 		return nil, err
 	}
 
-	// Record subscription in DB as PENDING until PayPal confirms.
+	// Record subscription in DB as PENDING until PayTabs confirms.
 	sub := models.Subscription{
-		TenantID:    tenantID,
-		Plan:        plan,
-		Amount:      limits.PriceUSD,
-		Currency:    "USD",
-		CartID:      uuid.New().String(),
-		PaypalSubID: ppSubID,
-		Status:      models.SubStatusPending,
+		TenantID:       tenantID,
+		Plan:           plan,
+		Amount:         limits.PriceEGP,
+		Currency:       paytabsCurrency(),
+		CartID:         cartID,
+		PaytabsTranRef: tx.TranRef,
+		Status:         models.SubStatusPending,
 	}
 	if err := database.DB.Create(&sub).Error; err != nil {
 		return nil, fmt.Errorf("create subscription record: %w", err)
 	}
 
 	return &CheckoutResult{
-		ApproveURL:     approveURL,
-		SubscriptionID: ppSubID,
+		RedirectURL: tx.RedirectURL,
+		TranRef:     tx.TranRef,
 	}, nil
 }
 
-// ActivateSubscription is called after PayPal redirects the user back.
-// It verifies the subscription is ACTIVE on PayPal's side and upgrades the tenant.
-func ActivateSubscription(paypalSubID string) error {
-	ppSub, err := GetSubscription(paypalSubID)
+// ActivateSubscription is called after PayTabs redirects the user back (or via
+// the IPN webhook). It re-queries PayTabs directly rather than trusting the
+// redirect query string, then upgrades the tenant and stores the card token.
+func ActivateSubscription(tranRef string) error {
+	tx, err := QueryTransaction(tranRef)
 	if err != nil {
-		return fmt.Errorf("verify subscription: %w", err)
+		return fmt.Errorf("verify transaction: %w", err)
+	}
+	if !tx.succeeded() {
+		return fmt.Errorf("payment not successful (status: %s)", tx.PaymentResult.ResponseStatus)
 	}
 
-	if ppSub.Status != "ACTIVE" {
-		return fmt.Errorf("subscription not active (status: %s)", ppSub.Status)
-	}
-
-	// Find our DB record.
 	var sub models.Subscription
-	if err := database.DB.First(&sub, "paypal_sub_id = ?", paypalSubID).Error; err != nil {
-		return fmt.Errorf("subscription not found for PayPal ID %s", paypalSubID)
+	if err := database.DB.First(&sub, "paytabs_tran_ref = ?", tranRef).Error; err != nil {
+		return fmt.Errorf("subscription not found for tran_ref %s", tranRef)
 	}
 
 	if sub.Status == models.SubStatusActive {
@@ -124,27 +141,22 @@ func ActivateSubscription(paypalSubID string) error {
 	tenantID := sub.TenantID
 	plan := sub.Plan
 	now := time.Now()
-	
+
 	expiresAt := now.AddDate(0, 1, 0)
-	if ppSub.BillingInfo.NextBillingTime != "" {
-		if parsed, err := time.Parse(time.RFC3339, ppSub.BillingInfo.NextBillingTime); err == nil {
-			expiresAt = parsed
-		}
-	} else {
-		var planDef models.PlanDef
-		if err := database.DB.First(&planDef, "name = ?", string(plan)).Error; err == nil {
-			if planDef.Period == "yr" || planDef.Period == "year" {
-				expiresAt = now.AddDate(planDef.IntervalCount, 0, 0)
-			} else {
-				expiresAt = now.AddDate(0, planDef.IntervalCount, 0)
-			}
+	var planDef models.PlanDef
+	if err := database.DB.First(&planDef, "name = ?", string(plan)).Error; err == nil {
+		if planDef.Period == "yr" || planDef.Period == "year" {
+			expiresAt = now.AddDate(planDef.IntervalCount, 0, 0)
+		} else {
+			expiresAt = now.AddDate(0, planDef.IntervalCount, 0)
 		}
 	}
 
 	if err := database.DB.Model(&sub).Updates(map[string]interface{}{
-		"status":     models.SubStatusActive,
-		"paid_at":    now,
-		"expires_at": expiresAt,
+		"status":        models.SubStatusActive,
+		"paid_at":       now,
+		"expires_at":    expiresAt,
+		"paytabs_token": tx.Token,
 	}).Error; err != nil {
 		return fmt.Errorf("update subscription: %w", err)
 	}
@@ -154,149 +166,81 @@ func ActivateSubscription(paypalSubID string) error {
 		Updates(map[string]interface{}{
 			"plan":            plan,
 			"plan_expires_at": expiresAt,
-			"paypal_sub_id":   paypalSubID,
+			"paytabs_token":   tx.Token,
 			"is_suspended":    false,
 			"trial_ends_at":   nil, // clear trial once user subscribes
 		}).Error; err != nil {
 		return fmt.Errorf("update tenant plan: %w", err)
 	}
 
-	log.Printf("billing: tenant %s subscribed to %s (PayPal sub %s)", tenantID, plan, paypalSubID)
+	log.Printf("billing: tenant %s subscribed to %s (PayTabs tran_ref %s)", tenantID, plan, tranRef)
 	return nil
 }
 
-// HandleWebhook processes PayPal subscription lifecycle events.
-// Called from the unauthenticated webhook endpoint.
-// We always re-verify against the PayPal API instead of trusting the raw payload.
-func HandleWebhook(eventType, resourceID string) error {
-	switch eventType {
+// HandleWebhook processes a verified PayTabs IPN payload. Called from the
+// webhook endpoint after the HMAC signature has already been checked.
+func HandleWebhook(tx *PTTransaction) error {
+	var sub models.Subscription
+	err := database.DB.First(&sub, "paytabs_tran_ref = ? OR cart_id = ?", tx.TranRef, tx.CartID).Error
 
-	case "BILLING.SUBSCRIPTION.ACTIVATED":
-		return ActivateSubscription(resourceID)
-
-	case "BILLING.SUBSCRIPTION.RENEWED", "PAYMENT.SALE.COMPLETED":
-		// resourceID may be a sale ID, not a subscription ID.
-		// For PAYMENT.SALE.COMPLETED the resource has billing_agreement_id = subscription ID.
-		return handleRenewal(resourceID)
-
-	case "BILLING.SUBSCRIPTION.CANCELLED", "BILLING.SUBSCRIPTION.EXPIRED":
-		return handleCancellation(resourceID)
-
-	case "BILLING.SUBSCRIPTION.SUSPENDED", "BILLING.SUBSCRIPTION.PAYMENT.FAILED":
-		return handleSuspension(resourceID)
-
-	default:
-		// Unknown event — ignore silently.
+	if !tx.succeeded() {
+		if err == nil {
+			database.DB.Model(&sub).Update("status", models.SubStatusFailed)
+			database.DB.Model(&models.Tenant{}).Where("id = ?", sub.TenantID).Update("is_suspended", true)
+			log.Printf("billing: transaction %s failed/declined, tenant %s suspended", tx.TranRef, sub.TenantID)
+		}
 		return nil
 	}
-}
 
-func handleRenewal(paypalSubID string) error {
-	ppSub, err := GetSubscription(paypalSubID)
 	if err != nil {
-		return err
-	}
-	if ppSub.Status != "ACTIVE" {
+		// Renewal charges (fired by the renewal worker) insert their own
+		// subscription row directly, so a missing record here just means the
+		// initial checkout hasn't been activated yet — handled by /billing/activate.
 		return nil
 	}
 
-	now := time.Now()
-	expiresAt := now.AddDate(0, 1, 0)
-	if ppSub.BillingInfo.NextBillingTime != "" {
-		if parsed, err := time.Parse(time.RFC3339, ppSub.BillingInfo.NextBillingTime); err == nil {
-			expiresAt = parsed
-		}
-	} else {
-		var sub models.Subscription
-		if err := database.DB.First(&sub, "paypal_sub_id = ?", paypalSubID).Error; err == nil {
-			var planDef models.PlanDef
-			if err := database.DB.First(&planDef, "name = ?", string(sub.Plan)).Error; err == nil {
-				if planDef.Period == "yr" || planDef.Period == "year" {
-					expiresAt = now.AddDate(planDef.IntervalCount, 0, 0)
-				} else {
-					expiresAt = now.AddDate(0, planDef.IntervalCount, 0)
-				}
-			}
-		}
+	if sub.Status == models.SubStatusActive && sub.PaidAt != nil {
+		return nil // already processed (idempotent)
 	}
 
-	// Extend plan_expires_at on both subscription record and tenant.
-	database.DB.Model(&models.Subscription{}).
-		Where("paypal_sub_id = ?", paypalSubID).
-		Updates(map[string]interface{}{
-			"paid_at":    now,
-			"expires_at": expiresAt,
-			"status":     models.SubStatusActive,
-		})
-
-	database.DB.Model(&models.Tenant{}).
-		Where("paypal_sub_id = ?", paypalSubID).
-		Updates(map[string]interface{}{
-			"plan_expires_at": expiresAt,
-			"is_suspended":    false,
-		})
-
-	log.Printf("billing: subscription %s renewed, expires %s", paypalSubID, expiresAt.Format("2006-01-02"))
-	return nil
+	return ActivateSubscription(tx.TranRef)
 }
 
-func handleCancellation(paypalSubID string) error {
-	database.DB.Model(&models.Subscription{}).
-		Where("paypal_sub_id = ?", paypalSubID).
-		Update("status", models.SubStatusCancelled)
-
-	// Downgrade tenant to STARTER after current period ends.
-	// We don't immediately remove access — plan_expires_at handles that.
-	database.DB.Model(&models.Tenant{}).
-		Where("paypal_sub_id = ?", paypalSubID).
-		Updates(map[string]interface{}{
-			"paypal_sub_id": "",
-		})
-
-	log.Printf("billing: subscription %s cancelled", paypalSubID)
-	return nil
-}
-
-func handleSuspension(paypalSubID string) error {
-	database.DB.Model(&models.Tenant{}).
-		Where("paypal_sub_id = ?", paypalSubID).
-		Update("is_suspended", true)
-
-	log.Printf("billing: subscription %s suspended (payment failure)", paypalSubID)
-	return nil
-}
-
-// CancelTenantSubscription cancels the tenant's active PayPal subscription.
+// CancelTenantSubscription clears the tenant's stored card token so the
+// renewal worker stops auto-charging. Access remains until plan_expires_at —
+// there's no remote subscription object to cancel with PayTabs.
 func CancelTenantSubscription(tenantID uuid.UUID, reason string) error {
 	var tenant models.Tenant
 	if err := database.DB.First(&tenant, "id = ?", tenantID).Error; err != nil {
 		return err
 	}
-	if tenant.PaypalSubID == "" {
+	if tenant.PaytabsToken == "" {
 		return fmt.Errorf("no active subscription to cancel")
 	}
 
-	if err := CancelSubscription(tenant.PaypalSubID, reason); err != nil {
-		return err
-	}
+	database.DB.Model(&models.Tenant{}).Where("id = ?", tenantID).Update("paytabs_token", "")
+	database.DB.Model(&models.Subscription{}).
+		Where("tenant_id = ? AND status = ?", tenantID, models.SubStatusActive).
+		Update("status", models.SubStatusCancelled)
 
-	return handleCancellation(tenant.PaypalSubID)
+	log.Printf("billing: tenant %s cancelled subscription (%s)", tenantID, reason)
+	return nil
 }
 
 // ─── Billing Info ──────────────────────────────────────────────────────────────
 
 type BillingInfo struct {
-	Plan          models.Plan           `json:"plan"`
-	PlanExpiresAt *time.Time            `json:"plan_expires_at,omitempty"`
-	TrialEndsAt   *time.Time            `json:"trial_ends_at,omitempty"`
-	IsInTrial     bool                  `json:"is_in_trial"`
-	TrialDaysLeft int                   `json:"trial_days_left"`
-	HasActiveSub  bool                  `json:"has_active_sub"`
-	// SubCancelled is true when user has cancelled their PayPal subscription but
+	Plan          models.Plan `json:"plan"`
+	PlanExpiresAt *time.Time  `json:"plan_expires_at,omitempty"`
+	TrialEndsAt   *time.Time  `json:"trial_ends_at,omitempty"`
+	IsInTrial     bool        `json:"is_in_trial"`
+	TrialDaysLeft int         `json:"trial_days_left"`
+	HasActiveSub  bool        `json:"has_active_sub"`
+	// SubCancelled is true when the user has cancelled (token cleared) but
 	// plan_expires_at is still in the future (they still have access).
-	SubCancelled bool       `json:"sub_cancelled"`
-	CancelsAt    *time.Time `json:"cancels_at,omitempty"`
-	IsSuspended  bool       `json:"is_suspended"`
+	SubCancelled bool                  `json:"sub_cancelled"`
+	CancelsAt    *time.Time            `json:"cancels_at,omitempty"`
+	IsSuspended  bool                  `json:"is_suspended"`
 	Limits       PlanLimits            `json:"limits"`
 	Usage        UsageStats            `json:"usage"`
 	Transactions []models.Subscription `json:"transactions"`
@@ -336,16 +280,16 @@ func GetBillingInfo(tenantID uuid.UUID) (*BillingInfo, error) {
 	// In trial only when: trial still running + never paid (plan_expires_at nil) + no active sub
 	isInTrial := tenant.TrialEndsAt != nil &&
 		now.Before(*tenant.TrialEndsAt) &&
-		tenant.PaypalSubID == "" &&
+		tenant.PaytabsToken == "" &&
 		tenant.PlanExpiresAt == nil
 	trialDaysLeft := 0
 	if isInTrial {
 		trialDaysLeft = int(time.Until(*tenant.TrialEndsAt).Hours()/24) + 1
 	}
 
-	hasActiveSub := tenant.PaypalSubID != ""
+	hasActiveSub := tenant.PaytabsToken != ""
 
-	// SubCancelled: no active PayPal sub but plan_expires_at is still in the future.
+	// SubCancelled: no stored token but plan_expires_at is still in the future.
 	// This means they cancelled but still have access until the period ends.
 	subCancelled := !hasActiveSub && tenant.PlanExpiresAt != nil && now.Before(*tenant.PlanExpiresAt) && tenant.Plan != models.PlanStarter
 	var cancelsAt *time.Time

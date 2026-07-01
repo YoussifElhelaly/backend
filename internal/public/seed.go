@@ -9,7 +9,7 @@ import (
 type defaultPlan struct {
 	Name         string
 	Label        string
-	PriceUSD     float64
+	PriceEGP     float64
 	Period       string
 	Desc         string
 	Badge        string
@@ -28,7 +28,7 @@ var defaultPlans = []defaultPlan{
 	{
 		Name:         "STARTER",
 		Label:        "Starter",
-		PriceUSD:     19,
+		PriceEGP:     599,
 		Period:       "mo",
 		Desc:         "Small teams & solo operators",
 		Badge:        "",
@@ -45,7 +45,7 @@ var defaultPlans = []defaultPlan{
 	{
 		Name:         "GROWTH",
 		Label:        "Growth",
-		PriceUSD:     49,
+		PriceEGP:     1499,
 		Period:       "mo",
 		Desc:         "Growing businesses",
 		Badge:        "Most Popular",
@@ -62,7 +62,7 @@ var defaultPlans = []defaultPlan{
 	{
 		Name:         "SCALE",
 		Label:        "Scale",
-		PriceUSD:     99,
+		PriceEGP:     2999,
 		Period:       "mo",
 		Desc:         "Agencies & enterprises",
 		Badge:        "",
@@ -94,7 +94,7 @@ func SeedDefaultPlans() {
 		plan := models.PlanDef{
 			Name:          p.Name,
 			Label:         p.Label,
-			PriceUSD:      p.PriceUSD,
+			PriceEGP:      p.PriceEGP,
 			Period:        p.Period,
 			IntervalCount: 1,
 			Desc:          p.Desc,

@@ -59,7 +59,7 @@ func handleStats(c *gin.Context) {
 
 	for plan, count := range stats.PlanBreakdown {
 		limits := billing.GetLimits(models.Plan(plan))
-		stats.MRR += float64(count) * limits.PriceUSD
+		stats.MRR += float64(count) * limits.PriceEGP
 	}
 
 	c.JSON(http.StatusOK, stats)
@@ -200,11 +200,11 @@ func handleListTenants(c *gin.Context) {
 
 type TenantDetail struct {
 	models.Tenant
-	Users         []models.User         `json:"users"`
+	Users         []models.User            `json:"users"`
 	Sessions      []models.WhatsAppSession `json:"sessions"`
-	Subscriptions []models.Subscription `json:"subscriptions"`
-	MessageCount  int64                 `json:"message_count"`
-	ContactCount  int64                 `json:"contact_count"`
+	Subscriptions []models.Subscription    `json:"subscriptions"`
+	MessageCount  int64                    `json:"message_count"`
+	ContactCount  int64                    `json:"contact_count"`
 }
 
 func handleGetTenant(c *gin.Context) {
@@ -740,15 +740,15 @@ func handleAdminActivity(c *gin.Context) {
 var serverStartTime = time.Now()
 
 type SystemHealth struct {
-	UptimeSeconds    int64  `json:"uptime_seconds"`
-	DBStatus         string `json:"db_status"`
-	ConnectedSessions int64 `json:"connected_sessions"`
-	TotalSessions    int64  `json:"total_sessions"`
-	TotalTenants     int64  `json:"total_tenants"`
-	TotalUsers       int64  `json:"total_users"`
-	GoVersion        string `json:"go_version"`
-	MemoryMB         float64 `json:"memory_mb"`
-	CPUThreads       int    `json:"cpu_threads"`
+	UptimeSeconds     int64   `json:"uptime_seconds"`
+	DBStatus          string  `json:"db_status"`
+	ConnectedSessions int64   `json:"connected_sessions"`
+	TotalSessions     int64   `json:"total_sessions"`
+	TotalTenants      int64   `json:"total_tenants"`
+	TotalUsers        int64   `json:"total_users"`
+	GoVersion         string  `json:"go_version"`
+	MemoryMB          float64 `json:"memory_mb"`
+	CPUThreads        int     `json:"cpu_threads"`
 }
 
 func handleSystemHealth(c *gin.Context) {
@@ -818,7 +818,7 @@ func handleBulkPlanChange(c *gin.Context) {
 		Update("plan", plan)
 
 	c.JSON(http.StatusOK, gin.H{
-		"message":     "bulk plan updated",
+		"message":       "bulk plan updated",
 		"updated_count": result.RowsAffected,
 	})
 }
