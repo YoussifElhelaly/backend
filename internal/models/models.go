@@ -658,6 +658,7 @@ type Subscription struct {
 	CartID         string             `gorm:"not null;uniqueIndex"                           json:"cart_id"`
 	PaytabsTranRef string             `gorm:"default:'';index"                               json:"paytabs_tran_ref,omitempty"`
 	PaytabsToken   string             `gorm:"default:''"                                     json:"-"`
+	BillingCycle   string             `gorm:"default:'mo'"                                   json:"billing_cycle"` // mo | 6mo | 12mo
 	Status         SubscriptionStatus `gorm:"not null;default:'PENDING'"                     json:"status"`
 	PaidAt         *time.Time         `json:"paid_at,omitempty"`
 	ExpiresAt      *time.Time         `json:"expires_at,omitempty"`
@@ -710,6 +711,8 @@ type PlanDef struct {
 	Label            string    `gorm:"not null"                                      json:"label"`
 	PriceEGP         float64   `gorm:"not null"                                      json:"price_egp"`
 	OriginalPriceEGP float64   `gorm:"not null;default:0"                            json:"original_price_egp"`
+	Price6moEGP      float64   `gorm:"column:price_6mo_egp;not null;default:0"        json:"price_6mo_egp"`  // total for 6-month billing; 0 = not offered
+	Price12moEGP     float64   `gorm:"column:price_12mo_egp;not null;default:0"       json:"price_12mo_egp"` // total for 12-month billing; 0 = not offered
 	Period           string    `gorm:"not null;default:'mo'"                         json:"period"`
 	IntervalCount    int       `gorm:"not null;default:1"                            json:"interval_count"`
 	Desc             string    `gorm:"type:text;default:''"                          json:"desc"`

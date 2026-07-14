@@ -54,29 +54,31 @@ func processRenewals() {
 }
 
 func renewTenant(tenant *models.Tenant) error {
-	limits := GetLimits(tenant.Plan)
-
-	var planDef models.PlanDef
-	interval := 1
-	yearly := false
-	if err := database.DB.First(&planDef, "name = ?", string(tenant.Plan)).Error; err == nil {
-		interval = planDef.IntervalCount
-		yearly = planDef.Period == "yr" || planDef.Period == "year"
-	}
-
 	// Anchor the new subscription row to the tenant's last one to get the
-	// previous tran_ref PayTabs requires for a token-based recurring charge.
+	// previous tran_ref PayTabs requires for a token-based recurring charge,
+	// and to carry over the billing cycle the tenant last chose.
 	var priorSub models.Subscription
 	if err := database.DB.Where("tenant_id = ? AND paytabs_tran_ref != ''", tenant.ID).
 		Order("created_at DESC").First(&priorSub).Error; err != nil {
 		return fmt.Errorf("no prior transaction to anchor renewal: %w", err)
 	}
 
+	cycle := normalizeCycle(priorSub.BillingCycle)
+	amount, months, planLabel, err := resolveCyclePrice(tenant.Plan, cycle)
+	if err != nil {
+		// The chosen cycle is no longer offered — fall back to monthly.
+		cycle = CycleMonthly
+		amount, months, planLabel, _ = resolveCyclePrice(tenant.Plan, cycle)
+	}
+	if months < 1 {
+		months = 1
+	}
+
 	cartID := "wf_renew_" + tenant.ID.String() + "_" + uuid.New().String()
 	tx, err := ChargeToken(
 		tenant,
-		fmt.Sprintf("Whatify %s subscription renewal", limits.Label),
-		limits.PriceEGP,
+		fmt.Sprintf("Whatify %s subscription renewal", planLabel),
+		amount,
 		tenant.PaytabsToken,
 		priorSub.PaytabsTranRef,
 		cartID,
@@ -89,19 +91,17 @@ func renewTenant(tenant *models.Tenant) error {
 	}
 
 	now := time.Now()
-	expiresAt := now.AddDate(0, interval, 0)
-	if yearly {
-		expiresAt = now.AddDate(interval, 0, 0)
-	}
+	expiresAt := now.AddDate(0, months, 0)
 
 	sub := models.Subscription{
 		TenantID:       tenant.ID,
 		Plan:           tenant.Plan,
-		Amount:         limits.PriceEGP,
+		Amount:         amount,
 		Currency:       paytabsCurrency(),
 		CartID:         cartID,
 		PaytabsTranRef: tx.TranRef,
 		PaytabsToken:   tenant.PaytabsToken,
+		BillingCycle:   cycle,
 		Status:         models.SubStatusActive,
 		PaidAt:         &now,
 		ExpiresAt:      &expiresAt,

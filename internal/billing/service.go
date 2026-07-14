@@ -59,7 +59,9 @@ type CheckoutResult struct {
 
 // Checkout creates a PayTabs hosted-payment-page request and returns the
 // redirect URL to send the user to, tokenising the card for future renewals.
-func Checkout(tenantID uuid.UUID, plan models.Plan) (*CheckoutResult, error) {
+// cycle selects the billing period (mo | 6mo | 12mo) which determines both the
+// charged amount and the subscription length.
+func Checkout(tenantID uuid.UUID, plan models.Plan, cycle string) (*CheckoutResult, error) {
 	var tenant models.Tenant
 	if err := database.DB.First(&tenant, "id = ?", tenantID).Error; err != nil {
 		return nil, fmt.Errorf("tenant not found: %w", err)
@@ -68,7 +70,11 @@ func Checkout(tenantID uuid.UUID, plan models.Plan) (*CheckoutResult, error) {
 	var owner models.User
 	database.DB.Where("tenant_id = ? AND role = ?", tenantID, models.RoleAdmin).First(&owner)
 
-	limits := GetLimits(plan)
+	cycle = normalizeCycle(cycle)
+	amount, _, planLabel, err := resolveCyclePrice(plan, cycle)
+	if err != nil {
+		return nil, err
+	}
 
 	frontendURL := os.Getenv("FRONTEND_URL")
 	if frontendURL == "" {
@@ -86,8 +92,8 @@ func Checkout(tenantID uuid.UUID, plan models.Plan) (*CheckoutResult, error) {
 	tx, err := CreatePaymentRequest(
 		&tenant,
 		customerDetails{tenant: &tenant, name: owner.Name, email: owner.Email},
-		fmt.Sprintf("Whatify %s subscription", limits.Label),
-		limits.PriceEGP,
+		fmt.Sprintf("Whatify %s subscription", planLabel),
+		amount,
 		cartID,
 		returnURL,
 		callbackURL,
@@ -101,10 +107,11 @@ func Checkout(tenantID uuid.UUID, plan models.Plan) (*CheckoutResult, error) {
 	sub := models.Subscription{
 		TenantID:       tenantID,
 		Plan:           plan,
-		Amount:         limits.PriceEGP,
+		Amount:         amount,
 		Currency:       paytabsCurrency(),
 		CartID:         cartID,
 		PaytabsTranRef: tx.TranRef,
+		BillingCycle:   cycle,
 		Status:         models.SubStatusPending,
 	}
 	if err := database.DB.Create(&sub).Error; err != nil {
@@ -142,15 +149,14 @@ func ActivateSubscription(tranRef string) error {
 	plan := sub.Plan
 	now := time.Now()
 
-	expiresAt := now.AddDate(0, 1, 0)
-	var planDef models.PlanDef
-	if err := database.DB.First(&planDef, "name = ?", string(plan)).Error; err == nil {
-		if planDef.Period == "yr" || planDef.Period == "year" {
-			expiresAt = now.AddDate(planDef.IntervalCount, 0, 0)
-		} else {
-			expiresAt = now.AddDate(0, planDef.IntervalCount, 0)
-		}
+	// Determine the subscription length from the billing cycle the user chose.
+	// resolveCyclePrice maps the cycle to a month count (and honors legacy
+	// per-plan Period/IntervalCount for monthly custom plans).
+	_, months, _, _ := resolveCyclePrice(plan, sub.BillingCycle)
+	if months < 1 {
+		months = 1
 	}
+	expiresAt := now.AddDate(0, months, 0)
 
 	if err := database.DB.Model(&sub).Updates(map[string]interface{}{
 		"status":        models.SubStatusActive,

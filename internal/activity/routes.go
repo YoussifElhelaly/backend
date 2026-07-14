@@ -8,7 +8,7 @@ import (
 )
 
 func RegisterRoutes(r *gin.RouterGroup) {
-	g := r.Group("", middleware.Auth(), middleware.RequireFeature(features.Activity))
+	g := r.Group("", middleware.Auth(), middleware.RequireFeature(features.Activity), middleware.RequireAdmin())
 	{
 		g.GET("/activity", listActivity)
 	}

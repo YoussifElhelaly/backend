@@ -8,6 +8,6 @@ import (
 )
 
 func RegisterRoutes(v1 *gin.RouterGroup) {
-	g := v1.Group("/analytics", middleware.Auth(), middleware.RequireFeature(features.Analytics))
+	g := v1.Group("/analytics", middleware.Auth(), middleware.RequireFeature(features.Analytics), middleware.RequireAdmin())
 	g.GET("/overview", getOverview)
 }

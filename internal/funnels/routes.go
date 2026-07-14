@@ -8,7 +8,7 @@ import (
 )
 
 func RegisterRoutes(v1 *gin.RouterGroup) {
-	g := v1.Group("/funnels", middleware.Auth(), middleware.RequireFeature(features.Funnels))
+	g := v1.Group("/funnels", middleware.Auth(), middleware.RequireFeature(features.Funnels), middleware.RequireAdmin())
 	g.GET("", listFunnels)
 	g.POST("", createFunnel)
 	g.GET("/:id", getFunnel)

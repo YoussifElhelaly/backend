@@ -32,7 +32,8 @@ func handleCheckout(c *gin.Context) {
 	tenantID := c.MustGet(middleware.CtxTenantID).(uuid.UUID)
 
 	var req struct {
-		Plan string `json:"plan" binding:"required"`
+		Plan  string `json:"plan" binding:"required"`
+		Cycle string `json:"cycle"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -46,7 +47,7 @@ func handleCheckout(c *gin.Context) {
 		return
 	}
 
-	result, err := Checkout(tenantID, plan)
+	result, err := Checkout(tenantID, plan, req.Cycle)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return

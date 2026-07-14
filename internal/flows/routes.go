@@ -8,7 +8,7 @@ import (
 )
 
 func RegisterRoutes(v1 *gin.RouterGroup) {
-	g := v1.Group("/flows", middleware.Auth(), middleware.RequireFeature(features.Flows))
+	g := v1.Group("/flows", middleware.Auth(), middleware.RequireFeature(features.Flows), middleware.RequireAdmin())
 	g.GET("", listFlows)
 	g.POST("", createFlow)
 	g.GET("/:id", getFlow)

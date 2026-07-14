@@ -9,8 +9,12 @@ import (
 
 func RegisterRoutes(r *gin.RouterGroup) {
 	g := r.Group("/quick-replies", middleware.Auth(), middleware.RequireFeature(features.QuickReplies))
+	// Read access is shared with agents (used by the inbox "/" composer shortcut).
 	g.GET("", list)
-	g.POST("", create)
-	g.PUT("/:id", update)
-	g.DELETE("/:id", remove)
+
+	// Template management is admin-only.
+	admin := g.Group("", middleware.RequireAdmin())
+	admin.POST("", create)
+	admin.PUT("/:id", update)
+	admin.DELETE("/:id", remove)
 }

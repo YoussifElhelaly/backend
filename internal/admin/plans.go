@@ -28,6 +28,8 @@ type CreatePlanRequest struct {
 	Label            string   `json:"label"         binding:"required"`
 	PriceEGP         float64  `json:"price_egp"     binding:"required,min=0"`
 	OriginalPriceEGP float64  `json:"original_price_egp"`
+	Price6moEGP      float64  `json:"price_6mo_egp"`
+	Price12moEGP     float64  `json:"price_12mo_egp"`
 	Period           string   `json:"period"`
 	IntervalCount    int      `json:"interval_count"`
 	Desc             string   `json:"desc"`
@@ -94,6 +96,8 @@ func handleCreatePlan(c *gin.Context) {
 		Label:            req.Label,
 		PriceEGP:         req.PriceEGP,
 		OriginalPriceEGP: req.OriginalPriceEGP,
+		Price6moEGP:      req.Price6moEGP,
+		Price12moEGP:     req.Price12moEGP,
 		Period:           period,
 		IntervalCount:    intervalCount,
 		Desc:             req.Desc,
@@ -123,6 +127,8 @@ type UpdatePlanRequest struct {
 	Label            *string   `json:"label"`
 	PriceEGP         *float64  `json:"price_egp"`
 	OriginalPriceEGP *float64  `json:"original_price_egp"`
+	Price6moEGP      *float64  `json:"price_6mo_egp"`
+	Price12moEGP     *float64  `json:"price_12mo_egp"`
 	Period           *string   `json:"period"`
 	IntervalCount    *int      `json:"interval_count"`
 	Desc             *string   `json:"desc"`
@@ -163,6 +169,12 @@ func handleUpdatePlan(c *gin.Context) {
 	}
 	if req.OriginalPriceEGP != nil {
 		updates["original_price_egp"] = *req.OriginalPriceEGP
+	}
+	if req.Price6moEGP != nil {
+		updates["price_6mo_egp"] = *req.Price6moEGP
+	}
+	if req.Price12moEGP != nil {
+		updates["price_12mo_egp"] = *req.Price12moEGP
 	}
 	if req.Period != nil {
 		updates["period"] = *req.Period

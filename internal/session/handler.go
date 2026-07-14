@@ -17,12 +17,16 @@ import (
 func RegisterRoutes(r *gin.RouterGroup) {
 	s := r.Group("/sessions", middleware.Auth())
 	{
+		// Read access is shared with agents (used by the inbox session switcher).
 		s.GET("", handleList)
-		s.POST("", handleCreate)
-		s.PUT("/:id", handleUpdate)
-		s.DELETE("/:id", handleDelete)
-		s.GET("/:id/qr", handleQR)
-		s.POST("/:id/reconnect", handleReconnect)
+
+		// Connecting/disconnecting WhatsApp numbers is admin-only.
+		admin := s.Group("", middleware.RequireAdmin())
+		admin.POST("", handleCreate)
+		admin.PUT("/:id", handleUpdate)
+		admin.DELETE("/:id", handleDelete)
+		admin.GET("/:id/qr", handleQR)
+		admin.POST("/:id/reconnect", handleReconnect)
 	}
 }
 
