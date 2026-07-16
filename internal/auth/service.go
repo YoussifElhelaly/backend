@@ -350,10 +350,11 @@ func buildAuthResponse(token string, user models.User, tenant models.Tenant) *Au
 			IsSuperAdmin: user.IsSuperAdmin,
 		},
 		Tenant: TenantDTO{
-			ID:          tenant.ID.String(),
-			Name:        tenant.Name,
-			Plan:        string(tenant.Plan),
-			TrialEndsAt: tenant.TrialEndsAt,
+			ID:                  tenant.ID.String(),
+			Name:                tenant.Name,
+			Plan:                string(tenant.Plan),
+			TrialEndsAt:         tenant.TrialEndsAt,
+			OnboardingCompleted: tenant.OnboardingCompleted,
 		},
 	}
 }

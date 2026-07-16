@@ -38,4 +38,7 @@ func RegisterRoutes(r *gin.RouterGroup) {
 	campaignSettings.GET("", getCampaignSettings)
 	campaignSettings.PUT("", updateCampaignSettings)
 	campaignSettings.GET("/usage", getCampaignUsage)
+
+	// Onboarding — admin-only
+	g.PUT("/settings/onboarding", middleware.RequireAdmin(), updateOnboardingSettings)
 }

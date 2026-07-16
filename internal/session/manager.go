@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
+	"math/rand"
 	"os/exec"
 	"strings"
 	"sync"
@@ -63,6 +64,8 @@ var Mgr = &Manager{
 	qrSubs:  make(map[string][]chan QRUpdate),
 }
 
+var historySyncMu sync.Mutex
+
 // SetMessageHandler registers the callback for incoming messages.
 func (m *Manager) SetMessageHandler(h MessageHandler) {
 	m.mu.Lock()
@@ -84,8 +87,24 @@ func (m *Manager) Connect(sessionID uuid.UUID) error {
 	var sess models.WhatsAppSession
 	database.DB.First(&sess, "id = ?", sessionID)
 
+	var tenant models.Tenant
+	database.DB.First(&tenant, "id = ?", sess.TenantID)
+
+	historySyncMu.Lock()
+	waStore.DeviceProps.RequireFullSync = proto.Bool(true)
+	if waStore.DeviceProps.HistorySyncConfig != nil {
+		days := tenant.HistorySyncDays
+		if days <= 0 {
+			days = 30
+		}
+		waStore.DeviceProps.HistorySyncConfig.FullSyncDaysLimit = proto.Uint32(uint32(days))
+		waStore.DeviceProps.HistorySyncConfig.FullSyncSizeMbLimit = proto.Uint32(102400)
+		waStore.DeviceProps.HistorySyncConfig.StorageQuotaMb = proto.Uint32(102400)
+	}
+
 	device := whatsapp.Container.NewDevice()
 	client := waProto.NewClient(device, waLog.Noop)
+	historySyncMu.Unlock()
 
 	// Auto-assign a proxy from the pool if this session has none configured.
 	if sess.ProxyURL == "" {
@@ -211,6 +230,9 @@ func (m *Manager) ReconnectAll() {
 	var sessions []models.WhatsAppSession
 	database.DB.Where("status IN ? AND phone != ''", []string{string(models.StatusConnected), string(models.StatusDisconnected)}).Find(&sessions)
 	for _, s := range sessions {
+		// Prevent thundering herd by introducing 2 to 10 seconds of random jitter
+		jitter := time.Duration(2+rand.Intn(8)) * time.Second
+		time.Sleep(jitter)
 		go m.Reconnect(s.ID, s.Phone)
 	}
 }
@@ -283,18 +305,7 @@ func (m *Manager) GetContactInfo(sessionID uuid.UUID, phone string) (string, str
 func (m *Manager) SendText(sessionID, phone, text string) (string, error) {
 	client := m.GetClient(sessionID)
 	if client == nil {
-		// Fallback: use any connected client
-		m.mu.RLock()
-		for _, c := range m.clients {
-			if c != nil && c.IsConnected() {
-				client = c
-				break
-			}
-		}
-		m.mu.RUnlock()
-	}
-	if client == nil {
-		return "", fmt.Errorf("session not connected")
+		return "", fmt.Errorf("session not connected or not found locally")
 	}
 	jid := types.NewJID(phone, types.DefaultUserServer)
 	resp, err := client.SendMessage(context.Background(), jid, &waE2E.Message{
@@ -304,6 +315,51 @@ func (m *Manager) SendText(sessionID, phone, text string) (string, error) {
 		return "", err
 	}
 	return resp.ID, nil
+}
+
+// SendTextWithTyping emulates human behavior by sending a composing state, waiting, and then sending the message.
+func (m *Manager) SendTextWithTyping(sessionID, phone, text string) (string, error) {
+	client := m.GetClient(sessionID)
+	if client == nil {
+		return "", fmt.Errorf("session not connected or not found locally")
+	}
+	
+	jid := types.NewJID(phone, types.DefaultUserServer)
+	
+	// Emulate typing
+	_ = client.SendChatPresence(context.Background(), jid, types.ChatPresenceComposing, "")
+	
+	// Calculate typing duration based on length (e.g. 50 chars per sec)
+	delaySecs := len(text) / 50
+	if delaySecs < 1 {
+		delaySecs = 1
+	} else if delaySecs > 5 {
+		delaySecs = 5
+	}
+	time.Sleep(time.Duration(delaySecs) * time.Second)
+	
+	// Send the message
+	resp, err := client.SendMessage(context.Background(), jid, &waE2E.Message{
+		Conversation: proto.String(text),
+	})
+	
+	// Pause typing
+	_ = client.SendChatPresence(context.Background(), jid, types.ChatPresencePaused, "")
+	
+	if err != nil {
+		return "", err
+	}
+	return resp.ID, nil
+}
+
+// MarkMessageAsRead sends a read receipt for a specific message to emulate human behavior.
+func (m *Manager) MarkMessageAsRead(sessionID string, chatJID types.JID, senderJID types.JID, messageID string) error {
+	client := m.GetClient(sessionID)
+	if client == nil {
+		return fmt.Errorf("session not connected")
+	}
+	
+	return client.MarkRead(context.Background(), []types.MessageID{types.MessageID(messageID)}, time.Now(), chatJID, senderJID)
 }
 
 // RequestOlderHistory asks WhatsApp to resend older messages for a single chat,
@@ -420,18 +476,7 @@ func normalizeAudioMime(mime string) string {
 func (m *Manager) SendMedia(sessionID, phone string, data []byte, mimeType, filename, caption string) (string, models.MessageType, []byte, error) {
 	client := m.GetClient(sessionID)
 	if client == nil {
-		// Fallback: use any connected client (same as SendText)
-		m.mu.RLock()
-		for _, c := range m.clients {
-			if c != nil && c.IsConnected() {
-				client = c
-				break
-			}
-		}
-		m.mu.RUnlock()
-	}
-	if client == nil {
-		return "", "", nil, fmt.Errorf("session not connected")
+		return "", "", nil, fmt.Errorf("session not connected or not found locally")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)

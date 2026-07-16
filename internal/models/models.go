@@ -31,11 +31,13 @@ type Tenant struct {
 	IsSuspended       bool           `gorm:"default:false"                                  json:"is_suspended"`
 	PaytabsToken      string         `gorm:"default:''"                                     json:"-"`
 	CampaignDelayMin  int            `gorm:"default:3"                                      json:"campaign_delay_min"`
-	CampaignDelayMax  int            `gorm:"default:8"                                      json:"campaign_delay_max"`
-	DailyMessageLimit int            `gorm:"default:25"                                     json:"daily_message_limit"`
-	CreatedAt         time.Time      `json:"created_at"`
-	UpdatedAt         time.Time      `json:"updated_at"`
-	DeletedAt         gorm.DeletedAt `gorm:"index"                                          json:"-"`
+	CampaignDelayMax     int            `gorm:"default:8"                                      json:"campaign_delay_max"`
+	DailyMessageLimit    int            `gorm:"default:25"                                     json:"daily_message_limit"`
+	HistorySyncDays      int            `gorm:"default:30"                                     json:"history_sync_days"`
+	OnboardingCompleted  bool           `gorm:"default:false"                                  json:"onboarding_completed"`
+	CreatedAt            time.Time      `json:"created_at"`
+	UpdatedAt            time.Time      `json:"updated_at"`
+	DeletedAt            gorm.DeletedAt `gorm:"index"                                          json:"-"`
 }
 
 type User struct {

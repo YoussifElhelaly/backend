@@ -16,9 +16,6 @@ import (
 	"whatify/backend/pkg/database"
 
 	"github.com/google/uuid"
-	"go.mau.fi/whatsmeow/proto/waE2E"
-	"go.mau.fi/whatsmeow/types"
-	"google.golang.org/protobuf/proto"
 )
 
 var (
@@ -58,14 +55,8 @@ func defaultSendText(sessionPhone, tenantID, to, text string) error {
 	if err := database.DB.Where("tenant_id = ? AND phone = ? AND status = 'CONNECTED'", tid, sessionPhone).First(&sess).Error; err != nil {
 		return fmt.Errorf("session not connected")
 	}
-	client := session.Mgr.GetClient(sess.ID.String())
-	if client == nil {
-		return fmt.Errorf("whatsapp client not found")
-	}
-	jid := types.NewJID(to, types.DefaultUserServer)
-	msg := &waE2E.Message{Conversation: proto.String(text)}
-	_, sendErr := client.SendMessage(context.Background(), jid, msg)
-	return sendErr
+	_, err = session.Mgr.SendTextWithTyping(sess.ID.String(), to, text)
+	return err
 }
 
 // pickVariant returns a round-robin variant from variantsJSON, falling back to fallback.

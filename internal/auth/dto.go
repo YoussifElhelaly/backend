@@ -65,8 +65,9 @@ type UserDTO struct {
 }
 
 type TenantDTO struct {
-	ID          string     `json:"id"`
-	Name        string     `json:"name"`
-	Plan        string     `json:"plan"`
-	TrialEndsAt *time.Time `json:"trial_ends_at,omitempty"`
+	ID                  string     `json:"id"`
+	Name                string     `json:"name"`
+	Plan                string     `json:"plan"`
+	TrialEndsAt         *time.Time `json:"trial_ends_at,omitempty"`
+	OnboardingCompleted bool       `json:"onboarding_completed"`
 }

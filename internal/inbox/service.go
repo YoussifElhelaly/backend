@@ -28,7 +28,7 @@ func MigrateSessionPhone() {
 var FunnelReplyHandler func(contactID, tenantID uuid.UUID) bool
 
 // FlowHandler is wired from the flows package to avoid import cycles.
-var FlowHandler func(tenantID uuid.UUID, sessionPhone string, contactID uuid.UUID, contact *models.Contact, conversationID uuid.UUID, text string, isNew bool)
+var FlowHandler func(tenantID uuid.UUID, sessionPhone string, contactID uuid.UUID, contact *models.Contact, conversationID uuid.UUID, text string, isNew bool, waMessageID string)
 
 // HandleIncoming is called by the session manager for each inbound WhatsApp message.
 // HandleIncoming processes a WhatsApp message — either incoming from a contact or
@@ -128,9 +128,9 @@ func HandleIncoming(
 		inFunnel = FunnelReplyHandler(contact.ID, tenantID)
 	}
 
-	// Only trigger flow automation when the contact is not being handled by a funnel
-	if !inFunnel && FlowHandler != nil {
-		go FlowHandler(tenantID, sessionPhone, contact.ID, contact, conv.ID, content, isNewContact)
+	// Trigger auto-flow if incoming text message
+	if !inFunnel && !isFromMe && msgType == models.MessageTypeText && FlowHandler != nil {
+		go FlowHandler(tenantID, sessionPhone, contact.ID, contact, conv.ID, content, isNewContact, waMessageID)
 	}
 }
 

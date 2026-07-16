@@ -13,6 +13,7 @@ import (
 	"whatify/backend/pkg/database"
 
 	"github.com/google/uuid"
+	"go.mau.fi/whatsmeow/types"
 )
 
 // Node types
@@ -95,6 +96,7 @@ func HandleIncoming(
 	conversationID uuid.UUID,
 	messageText string,
 	isNewContact bool,
+	waMessageID string,
 ) {
 	var flows []models.Flow
 	database.DB.Where("tenant_id = ? AND is_active = true", tenantID).Find(&flows)
@@ -114,7 +116,7 @@ func HandleIncoming(
 					slog.Error("flows: PANIC recovered in execute", "flow_id", f.ID, "panic", r)
 				}
 			}()
-			execute(f, tenantID, sessionPhone, contactID, contact, conversationID, messageText)
+			execute(f, tenantID, sessionPhone, contactID, contact, conversationID, messageText, waMessageID)
 		}()
 	}
 }
@@ -155,6 +157,7 @@ func execute(
 	contact *models.Contact,
 	conversationID uuid.UUID,
 	triggerMsg string,
+	waMessageID string,
 ) {
 	var nodes []Node
 	if err := json.Unmarshal([]byte(flow.Nodes), &nodes); err != nil {
@@ -164,6 +167,17 @@ func execute(
 
 	results := make([]actionResult, 0, len(nodes))
 	runStatus := "completed"
+
+	// Emulate read receipt
+	if waMessageID != "" {
+		var sess models.WhatsAppSession
+		if err := database.DB.Where("tenant_id = ? AND phone = ? AND status = 'CONNECTED'", tenantID, sessionPhone).First(&sess).Error; err == nil {
+			chatJID := types.NewJID(contact.PhoneNumber, types.DefaultUserServer)
+			_ = session.Mgr.MarkMessageAsRead(sess.ID.String(), chatJID, chatJID, waMessageID)
+			// Small delay after reading before typing
+			time.Sleep(1 * time.Second)
+		}
+	}
 
 	for _, node := range nodes {
 		res := actionResult{Type: node.Type, Status: "ok"}
@@ -350,8 +364,8 @@ func doSendText(tenantID uuid.UUID, sessionPhone, to, text string) error {
 		First(&sess).Error; err != nil {
 		return fmt.Errorf("session not connected")
 	}
-	// session.Mgr.SendText already has fallback-client logic
-	_, err := session.Mgr.SendText(sess.ID.String(), to, text)
+	// session.Mgr.SendTextWithTyping
+	_, err := session.Mgr.SendTextWithTyping(sess.ID.String(), to, text)
 	return err
 }
 
